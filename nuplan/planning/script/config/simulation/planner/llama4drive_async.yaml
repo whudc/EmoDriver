@@ -1,0 +1,33 @@
+# Asynchronous LLAMA4Drive Planner Configuration
+llama4drive_async:
+  _target_: llama2.planner.llama4drive_planner_async.AsyncLLAMA4DrivePlanner
+  _convert_: 'all'
+
+  # Async-specific parameters
+  async_mode: True  # Set to False to use sync mode
+  llm_update_interval: 1.5  # LLM update interval in seconds (e.g., 1.5s = ~0.67 Hz)
+  llm_device: 'cuda:0'  # Device for LLM
+  gameformer_device: 'cuda:0'  # Device for GameFormer (can use different GPU)
+
+  # Original parameters
+  disable_refpath: False
+  llm_plan: False
+  ins_wo_stop: True
+  short_ins: 30
+  lora_r: 8
+
+  # Optional sub-planner for PDM scoring
+  sub_planner: null
+  enable_pdm_scorer_in_multirefpath: False
+
+  # Model configuration
+  model_cfg:
+    - model_name_or_path: null  # Will be set by command line
+    - finetune_model_path: null  # Will be set by command line
+    - has_second_stage: True
+    - adapter_fusion: True
+    - llm_multi_head: True
+    - enable_lora: True
+    - ins_wo_stop: True
+    - feature_len: 80
+    - llm_inf_step: 1  # Not used in async mode

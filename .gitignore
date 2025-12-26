@@ -1,0 +1,9 @@
+data/
+qwen/qwen/
+qwen/output/
+qwen/tensorboard/
+
+training_log
+
+
+*.pyc
