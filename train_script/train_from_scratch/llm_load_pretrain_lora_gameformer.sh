@@ -44,7 +44,7 @@ deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_llama4driv
 --deepspeed ${root_dir}/ds_config.json \
 --ddp_timeout 18000000 \
 --gameformer_ckpt training_log/model_epoch_48_valADE_1.1187.pth \
---lora_ckpt llama2/output/mix_driveqa_decision/adapter_model.bin \
+--lora_ckpt llama2/output/mix_driveqa_decision/adapter_model.safetensors \
 --overwrite_output_dir \
 # # debug
 # --max_train_samples 200 \

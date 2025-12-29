@@ -410,7 +410,19 @@ def get_all_rows_with_value(
     :param desired_value: key which is compared with the values of column_label entry.
     :return: a subset of the original GeoDataFrame containing the matching key.
     """
-    return elements.iloc[np.where(elements[column_label].to_numpy().astype(int) == int(desired_value))]
+    # Step 1: Convert to numeric with NaN handling
+    elements[column_label] = pd.to_numeric(elements[column_label], errors='coerce')
+
+    # Step 2: Drop rows with NaN values
+    elements = elements.dropna(subset=[column_label])
+
+    # Step 3: Perform the comparison (check NaN first, then cast to int)
+    valid_elements = elements[column_label].dropna()  # Drop NaN before conversion
+    valid_elements = valid_elements.astype(int)
+
+    result = elements.iloc[np.where(valid_elements == int(desired_value))]
+    
+    return result
 
 
 def get_row_with_value(elements: gpd.geodataframe.GeoDataFrame, column_label: str, desired_value: str) -> pd.Series:

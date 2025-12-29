@@ -32,9 +32,10 @@ References Used: https://people.eecs.berkeley.edu/~pabbeel/cs287-fa19/slides/Lec
 """
 
 import time
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, field
 from typing import List, Optional, Tuple
 
+# from attrs import field
 import numpy as np
 import numpy.typing as npt
 
@@ -51,11 +52,6 @@ DoubleMatrix = npt.NDArray[np.float64]
 @dataclass(frozen=True)
 class ILQRSolverParameters:
     """Parameters related to the solver implementation."""
-    
-    # Obstacle avoidance parameters (optional)
-    obstacle_positions: List[Tuple[float, float]] = []  # List of (x,y) obstacle coordinates
-    obstacle_safety_distance: float = 0.0  # [m] Minimum safe distance from obstacles
-    obstacle_cost_weight: float = 0.0  # Weight for obstacle cost term
 
     discretization_time: float  # [s] Time discretization used for integration.
 
@@ -81,8 +77,13 @@ class ILQRSolverParameters:
 
     # Parameters for dynamics / linearization.
     min_velocity_linearization: float  # [m/s] Absolute value threshold below which linearization velocity is modified.
-    wheelbase: float = get_pacifica_parameters().wheel_base  # [m] Wheelbase length parameter for the vehicle.
 
+    wheelbase: float = get_pacifica_parameters().wheel_base  # [m] Wheelbase length parameter for the vehicle.
+    # Obstacle avoidance parameters (optional)
+    obstacle_positions: List[Tuple[float, float]] = field(default_factory=list)  # List of (x,y) obstacle coordinates
+    obstacle_safety_distance: float = 0.0  # [m] Minimum safe distance from obstacles
+    obstacle_cost_weight: float = 0.0  # Weight for obstacle cost term
+    
     def __post_init__(self) -> None:
         """Ensure entries lie in expected bounds and initialize wheelbase."""
         # Validate obstacle parameters (allow empty obstacle list)

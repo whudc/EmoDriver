@@ -250,8 +250,8 @@ class PGPEgoAgentsFeatureBuilder(AbstractFeatureBuilder):
             agent_features: npt.NDArray[np.float32] = np.empty(
                 shape=(len(agent_history), 0, 5), dtype=np.float32
             )
-            agent_features_mask: npt.NDArray[np.bool8] = np.full(
-                shape=(len(agent_history), 0, 5), fill_value=False, dtype=np.bool8
+            agent_features_mask: npt.NDArray[np.bool_] = np.full(
+                shape=(len(agent_history), 0, 5), fill_value=False, dtype=np.bool_
             )
         else:
             (
@@ -263,7 +263,7 @@ class PGPEgoAgentsFeatureBuilder(AbstractFeatureBuilder):
                 agent_velocities_horizon_masks,
             ) = extract_and_pad_agent_velocities(agent_history, reverse=True)
 
-            agent_features_mask: npt.NDArray[np.bool8] = np.stack(
+            agent_features_mask: npt.NDArray[np.bool_] = np.stack(
                 [
                     agent_states_horizon_masks,
                     agent_states_horizon_masks,

@@ -609,8 +609,6 @@ def main():
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
-        # compute_metrics=compute_metrics if training_args.do_eval and not is_torch_tpu_available() else None,
-        # preprocess_logits_for_metrics=preprocess_logits_for_metrics if training_args.do_eval and not is_torch_tpu_available()else None,
         compute_metrics=compute_metrics if training_args.do_eval else None,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics if training_args.do_eval else None,
         callbacks=([SavePeftModelCallback] if isinstance(model, PeftModel) else None),
@@ -624,7 +622,7 @@ def main():
             checkpoint_name = os.path.join(resume_from_checkpoint, "pytorch_model.bin")
             if not os.path.exists(checkpoint_name):
                 checkpoint_name = os.path.join(
-                    resume_from_checkpoint, "adapter_model.bin"
+                    resume_from_checkpoint, "adapter_model.safetensors"
                 )  # only LoRA model - LoRA config above has to fit
                 resume_from_checkpoint = (
                     False  # So the trainer won't try loading its state

@@ -26,10 +26,10 @@ fi
 echo "Save Directory: $SAVE_DIR_NAME"
 echo "========================================="
 
-CUDA_VISIBLE_DEVICES=$GPU_ID python train_script/inference/simulator_llama4drive_async.py \
---planner llama2/output/llm_load_pretrain_lora_gameformer/checkpoint-2100 \
---base_model llama2/llama-2-13b-chat-hf \
---planner_type llama4drive_async \
+CUDA_VISIBLE_DEVICES=$GPU_ID python train_script/inference/simulator_qwen4drive_async.py \
+--planner qwen/output/llm_load_pretrain_lora_gameformer_qwen/checkpoint-16875 \
+--base_model qwen/qwen/Qwen3-8B \
+--planner_type qwen4drive_async \
 --save_dir $SAVE_DIR_NAME \
 --ins_wo_stop \
 --short_ins 30 \

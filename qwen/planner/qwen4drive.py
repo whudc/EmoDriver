@@ -13,18 +13,16 @@ from transformers import (
     HfArgumentParser,
     TrainingArguments,
     BitsAndBytesConfig,
-    is_torch_tpu_available,
     set_seed,
 )
 from peft import (  # noqa: E402
     LoraConfig,
     PeftModel,
-    prepare_model_for_int8_training,
     prepare_model_for_kbit_training,
     set_peft_model_state_dict,
 )
 
-from qwen.model_qwen4drive import QwenForCausalLM, ModelWithLoRA
+from qwen.model_qwen4drive import Qwen3ForCausalLM, ModelWithLoRA
 import torch
 import numpy as np
 
@@ -82,7 +80,7 @@ def get_model(model_name_or_path=None,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.bfloat16
     )
-    model = QwenForCausalLM.from_pretrained(
+    model = Qwen3ForCausalLM.from_pretrained(
         model_name_or_path,
         config=config,
         torch_dtype=torch.float16,

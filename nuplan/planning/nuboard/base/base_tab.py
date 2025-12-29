@@ -4,7 +4,8 @@ from typing import Any, List, Optional
 
 from bokeh.document.document import Document
 from bokeh.models import CheckboxGroup, MultiChoice
-from bokeh.plotting.figure import Figure
+# from bokeh.plotting.figure import Figure
+from bokeh.plotting import figure
 
 from nuplan.planning.nuboard.base.data_class import SelectedMetricStatisticDataFrame, SimulationScenarioKey
 from nuplan.planning.nuboard.base.experiment_file_data import ExperimentFileData
@@ -122,7 +123,7 @@ class BaseTab:
         return self.scatter_signs[index]
 
     @staticmethod
-    def get_scatter_render_func(scatter_sign: str, scatter_figure: Figure) -> Any:
+    def get_scatter_render_func(scatter_sign: str, scatter_figure) -> Any:
         """
         Render a scatter plot.
         :param scatter_sign: Scatter sign.

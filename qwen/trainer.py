@@ -653,7 +653,6 @@ class CustomTrainer(Trainer):
                             tr_loss[k] = torch.tensor(0.0).to(args.device)
                         if (
                             args.logging_nan_inf_filter
-                            # and not is_torch_tpu_available()
                             and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
                         ):
                             # if loss is nan or inf simply add the average of previous logged losses

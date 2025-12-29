@@ -1,9 +1,13 @@
 data/
+dataset_cache/
+logs/
 qwen/qwen/
 qwen/output/
 qwen/tensorboard/
 
-training_log
+simulation_save_root_path/
+
+training_log/
 
 
 *.pyc

@@ -40,7 +40,7 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, PaddingStrategy
 from transformers.utils.versions import require_version
-from qwen.model_qwen4drive import QwenForCausalLM, ModelWithLoRA
+from qwen.model_qwen4drive import Qwen3ForCausalLM, ModelWithLoRA
 from qwen.trainer import CustomTrainerQwen4Drive as Trainer
 
 from nuplan.planning.training.preprocessing.feature_collate import _batch_abstract_features
@@ -393,7 +393,7 @@ def main():
     )
 
     torch_dtype = torch.float16
-    model = QwenForCausalLM.from_pretrained(
+    model = Qwen3ForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
@@ -525,7 +525,7 @@ def main():
         else:
             map_info = np.load(map_info, allow_pickle=True)
             if 'ego_v_a' in [k for k in map_info.keys()]:
-                print('!!!!!!!!!!! Using map info with dynamic features !!!!!!!!!!!')
+                # print('!!!!!!!!!!! Using map info with dynamic features !!!!!!!!!!!')
                 input_dict = {
                     'ego_agent_past': map_info['ego_agent_past'], # history
                     'neighbor_agents_past': map_info['neighbor_agents_past'],
@@ -555,7 +555,7 @@ def main():
                     traffic_light_array[3] = 1
                 input_dict['traffic_light'] = traffic_light_array
             else:
-                print('!!!!!!!!!!! Using map info without dynamic features !!!!!!!!!!!')
+                # print('!!!!!!!!!!! Using map info without dynamic features !!!!!!!!!!!')
                 input_dict = {
                     'ego_agent_past': map_info['ego_agent_past'],
                     'neighbor_agents_past': map_info['neighbor_agents_past'],

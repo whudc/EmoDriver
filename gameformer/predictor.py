@@ -5,9 +5,8 @@ try:
 except:
     from predictor_modules import *
 from typing import Callable, List, Optional, Union
-from gameformer.layers.transformer import _get_activation_fn
 
-# for qwen 
+
 class SafeTransformerEncoderLayer(nn.TransformerEncoderLayer):
     def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
         src = self.norm1(src + self._sa_block(src, src_mask, src_key_padding_mask, is_causal))
@@ -19,7 +18,7 @@ class SafeTransformerEncoderLayer(nn.TransformerEncoderLayer):
             x, x, x,
             attn_mask=attn_mask,
             key_padding_mask=key_padding_mask,
-            # is_causal=is_causal,  # ✅ 传递给 MultiheadAttention
+            is_causal=is_causal,  
             need_weights=True
         )
         return self.dropout1(x)

@@ -3,7 +3,8 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
-from bokeh.plotting import Figure
+# from bokeh.plotting import Figure
+from bokeh.plotting import figure
 
 from nuplan.planning.nuboard.style import PLOT_PALETTE
 
@@ -31,7 +32,7 @@ class HistogramData:
 class HistogramFigureData:
     """Histogram figure data."""
 
-    figure_plot: Figure  # Histogram statistic figure
+    figure_plot: Any  # Histogram statistic figure
     frequency_array: Optional[npt.NDArray[np.int64]] = None
 
 
@@ -96,7 +97,7 @@ class HistogramTabHistogramBarStyleConfig:
         }
 
     @classmethod
-    def update_histogram_bar_figure_style(cls, histogram_figure: Figure) -> None:
+    def update_histogram_bar_figure_style(cls, histogram_figure: Any) -> None:
         """Update histogram figure bar style."""
         histogram_figure.y_range.start = 0
         histogram_figure.legend.background_fill_alpha = 0.3
@@ -158,7 +159,7 @@ class HistogramTabFigureStyleConfig:
         }
 
     @classmethod
-    def update_histogram_figure_style(cls, histogram_figure: Figure) -> None:
+    def update_histogram_figure_style(cls, histogram_figure: Any) -> None:
         """Update histogram figure style."""
         histogram_figure.title.text_font_size = "8pt"
         histogram_figure.xaxis.axis_label_text_font_size = "8pt"

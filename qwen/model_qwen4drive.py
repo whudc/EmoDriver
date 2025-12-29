@@ -9,13 +9,15 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from dataclasses import dataclass
+from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
+from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.utils import logging, ModelOutput
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
-
+from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm, Qwen3RotaryEmbedding, Qwen3MLP, apply_rotary_pos_emb, eager_attention_forward
 from safetensors.torch import save_file as safe_save_file
 from safetensors.torch import load_file
 from peft.peft_model import PeftModelForCausalLM
@@ -33,7 +35,7 @@ from gameformer.train_utils import *
 
 from peft import set_peft_model_state_dict
 
-from qwen.model import Qwen3RMSNorm, Qwen3DecoderLayer, _make_causal_mask, _expand_mask
+from qwen.model import Qwen3RMSNorm, Qwen3DecoderLayer
 
 logger = logging.getLogger(__name__)
 
@@ -101,68 +103,32 @@ class Qwen3Model(Qwen3PreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([Qwen3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList(
+            [Qwen3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        )
         self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.hidden_size = config.hidden_size
-
+        self.rotary_emb = Qwen3RotaryEmbedding(config=config)
         self.gradient_checkpointing = False
+        self.has_sliding_layers = "sliding_attention" in self.config.layer_types
+
+        self.hidden_size = config.hidden_size
         self.special_token_id = config.special_token_dict['<map>']
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
-
-    # Copied from transformers.models.bart.modeling_bart.BartDecoder._prepare_decoder_attention_mask
-    def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
-        # create causal mask
-        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-        combined_attention_mask = None
-        if input_shape[-1] > 1:
-            combined_attention_mask = _make_causal_mask(
-                input_shape,
-                inputs_embeds.dtype,
-                device=inputs_embeds.device,
-                past_key_values_length=past_key_values_length,
-            )
-
-        if attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
-                inputs_embeds.device
-            )
-            combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
-            )
-
-        return combined_attention_mask
-    
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
         map_feats: torch.FloatTensor = None,
         map_masks: torch.FloatTensor = None,
         labels: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Union[Tuple, BaseModelOutputWithPastDrive]:
         if past_key_values is not None:
             input_ids_clone = input_ids.clone()
             input_ids = input_ids[:, -1:]
@@ -202,7 +168,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        
+    
         loca = []
         if map_feats is not None and past_key_values is None:
             new_inputs_embeds = torch.zeros((batch_size, new_tokens_num, inputs_embeds.shape[-1]), device=input_ids.device).to(inputs_embeds.dtype)
@@ -248,90 +214,65 @@ class Qwen3Model(Qwen3PreTrainedModel):
             attention_mask = new_inputs_attention_mask
             position_ids += map_feats.shape[1]
 
-        # embed positions
-        if attention_mask is None:
-            attention_mask = torch.ones(
-                (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache(config=self.config)
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
             )
-        attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
-        )
+
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+
+        # It may already have been prepared by e.g. `generate`
+        if not isinstance(causal_mask_mapping := attention_mask, dict):
+            # Prepare mask arguments
+            mask_kwargs = {
+                "config": self.config,
+                "input_embeds": inputs_embeds,
+                "attention_mask": attention_mask,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "position_ids": position_ids,
+            }
+            # Create the masks
+            causal_mask_mapping = {
+                "full_attention": create_causal_mask(**mask_kwargs),
+            }
+            # The sliding window alternating layers are not always activated depending on the config
+            if self.has_sliding_layers:
+                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
 
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        next_decoder_cache = () if use_cache else None
-
-        for idx, decoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
-
-            if self.gradient_checkpointing and self.training:
-
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        # None for past_key_value
-                        return module(*inputs, past_key_value, output_attentions)
-
-                    return custom_forward
-
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(decoder_layer),
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                )
-
-            hidden_states = layer_outputs[0]
-
-            if use_cache:
-                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
-
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+            hidden_states = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask_mapping[decoder_layer.attention_type],
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+            )
 
         hidden_states = self.norm(hidden_states)
 
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        next_cache = next_decoder_cache if use_cache else None
-        if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
-        
         return BaseModelOutputWithPastDrive(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
-            loca=loca,
+            past_key_values=past_key_values if use_cache else None,
         ), labels, new_inputs_attention_mask, return_special_toks_loc
 
 
-
-class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
+class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
+    _tp_plan = {"lm_head": "colwise_rep"}
+    _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
     _keep_in_fp32_modules = ['map_adapter',
                             #  'waypoints_fc',
                              'waypoints_predictor',
@@ -344,6 +285,7 @@ class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
                              'lane_change',
                              'traffic_light',
                              'feature_adpter']
+
     _keep_small_lr_modules = [
             'gameformer',
         ]
@@ -354,8 +296,8 @@ class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         self.model = Qwen3Model(config)
         self.config = config
         self.vocab_size = config.vocab_size
-        self.feature_len = config.feature_len # number of waypoint, default=80
-        # self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.feature_len = config.feature_len
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         
         # Add Map adapter layers
         self.map_insize = config.map_insize
@@ -405,32 +347,6 @@ class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         self.feature_adpter = nn.Linear(self.model.config.hidden_size, 256)
             
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        try:
-            number_weight = config.number_weight
-        except:
-            number_weight = 1.0
-        weighted_mask = torch.ones(config.vocab_size, dtype=torch.float32)
-        if number_weight > 1:
-            number_tokens = [
-                448,
-                29900,
-                29889,
-                29896,
-                29906,
-                29941,
-                29946,
-                29945,
-                29953,
-                29955,
-                29947,
-                29929,
-            ]  # -0.123456789
-            weighted_mask[number_tokens] = number_weight
-        self.weighted_mask = weighted_mask
-        # 添加调试
-        for module_name in self._keep_in_fp32_modules:
-            if not hasattr(self, module_name):
-                print(f"Warning: {module_name} not found but in _keep_in_fp32_modules")
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -535,27 +451,9 @@ class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
     def float(self, *args):
         return nn.Module.float(self)
 
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.model.embed_tokens = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
-    
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
         map_feats: Optional[torch.FloatTensor] = None,
         map_masks: Optional[torch.FloatTensor] = None,
         urban_features = None,
@@ -576,46 +474,41 @@ class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         ego_lane_flag: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
         inference = False,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
     ) -> Union[Tuple, CausalLMOutputWithPastWithModel]:
+
+        # output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        # output_hidden_states = (
+        #     output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        # )
+        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # gt for gameformer
         # import ipdb; ipdb.set_trace()
         if not inference:
             ego_future_gt = ego_future
             neighbors_future_gt = neighbors_future
             neighbors_future_valid_gt = torch.ne(neighbors_future_gt[..., :2], 0)
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         if map_feats is not None:
             map_feats = map_feats.to(self.map_adapter.weight.dtype)
             map_feats = self.map_adapter(map_feats)
             map_feats = map_feats.to(self.map_adapter.weight.dtype)
         if ego_agent_past is not None:
             assert map_feats is None
-            ego_agent_past = ego_agent_past.to(self.map_adapter.weight.dtype)
-            neighbor_agents_past = neighbor_agents_past.to(self.map_adapter.weight.dtype)
-            map_lanes = map_lanes.to(self.map_adapter.weight.dtype)
-            map_crosswalks = map_crosswalks.to(self.map_adapter.weight.dtype)
-            route_lanes = route_lanes.to(self.map_adapter.weight.dtype)
-
             raw_map_vector = {
-                'ego_agent_past': ego_agent_past, #[1, 21, 7]
-                'neighbor_agents_past': neighbor_agents_past,
-                'map_lanes': map_lanes, # [16, 40, 50, 7]
-                'map_crosswalks': map_crosswalks,
-                'route_lanes': route_lanes, # [16, 10, 50, 3]
+                'ego_agent_past': ego_agent_past.to(self.map_adapter.weight.dtype), #[1, 21, 7]
+                'neighbor_agents_past': neighbor_agents_past.to(self.map_adapter.weight.dtype),
+                'map_lanes': map_lanes.to(self.map_adapter.weight.dtype), # [16, 40, 50, 7]
+                'map_crosswalks': map_crosswalks.to(self.map_adapter.weight.dtype),
+                'route_lanes': route_lanes.to(self.map_adapter.weight.dtype), # [16, 10, 50, 3]
             }
             encoder_outputs = self.map_encoder(raw_map_vector)
             map_feats, map_masks = encoder_outputs['encoding'], encoder_outputs['mask']
@@ -637,27 +530,24 @@ class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            cache_position=cache_position,
+            # output_attentions=output_attentions,
+            # output_hidden_states=output_hidden_states,
+            # return_dict=return_dict,
         )
         ego_plan = None
         level_k_outputs = None
-        hidden_states = outputs[0]
+        hidden_states = outputs.last_hidden_state
+        
         if isinstance(cur_iter, int):
             cur_iter = cur_iter
         else:
             cur_iter = getattr(cur_iter, "index", 0)
 
-        # if self.llm_inf_step == -1, always not use llm hidden states
-        if self.llm_inf_step == -1:
-            hidden_states = hidden_states
-        # else, use llm hidden states every llm_inf_step iterations
+        if cur_iter % self.llm_inf_step != 0:
+            hidden_states = self.prev_hidden_states
         else:
-            if cur_iter % self.llm_inf_step != 0:
-                hidden_states = self.prev_hidden_states
-            else:
-                self.prev_hidden_states = hidden_states
+            self.prev_hidden_states = hidden_states
         
         # use query feature instead of direct hidden_states
         ########
@@ -731,13 +621,19 @@ class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             plan_loss = planning_loss(ego_plan, ego_future_gt[..., :2])
             gameformer_loss = gmm_loss + plan_loss
             loss = gameformer_loss + llm_loss
-        
+        # print("hidden_states.shape =", hidden_states.shape)
+
+        # slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        # logits = self.lm_head(hidden_states[:, slice_indices, :])
         logits = self.lm_head(hidden_states)
-        logits = logits.float()
-            
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
+
+        # loss = None
+        # if labels is not None:
+        #     loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size)
+
+        # if not return_dict:
+        #     output = (logits,) + outputs[1:]
+        #     return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPastWithModel(
             loss=loss if not inference else None,
@@ -910,28 +806,6 @@ class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
     def resize_token_embeddings(
         self, new_num_tokens: Optional[int] = None, pad_to_multiple_of: Optional[int] = None
     ) -> nn.Embedding:
-        """
-        Resizes input token embeddings matrix of the model if `new_num_tokens != config.vocab_size`.
-
-        Takes care of tying weights embeddings afterwards if the model class has a `tie_weights()` method.
-
-        Arguments:
-            new_num_tokens (`int`, *optional*):
-                The number of new tokens in the embedding matrix. Increasing the size will add newly initialized
-                vectors at the end. Reducing the size will remove vectors from the end. If not provided or `None`, just
-                returns a pointer to the input tokens `torch.nn.Embedding` module of the model without doing anything.
-            pad_to_multiple_of (`int`, *optional*):
-                If set will pad the embedding matrix to a multiple of the provided value.If `new_num_tokens` is set to
-                `None` will just pad the embedding to a multiple of `pad_to_multiple_of`.
-
-                This is especially useful to enable the use of Tensor Cores on NVIDIA hardware with compute capability
-                `>= 7.5` (Volta), or on TPUs which benefit from having sequence lengths be a multiple of 128. For more
-                details about this, or help on choosing the correct value for resizing, refer to this guide:
-                https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#requirements-tc
-
-        Return:
-            `torch.nn.Embedding`: Pointer to the input tokens Embeddings Module of the model.
-        """
         model_embeds = self._resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
         if new_num_tokens is None and pad_to_multiple_of is None:
             return model_embeds
@@ -969,7 +843,7 @@ class QwenForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         self.tie_weights()
 
         return model_embeds
-    
+
 
 
 class ModelWithLoRA(PeftModelForCausalLM):
@@ -1013,8 +887,9 @@ class ModelWithLoRA(PeftModelForCausalLM):
         if model_id is None:
             print('!!!!  No model id, not loaded at all')
             return
-        lora_ckpt = os.path.join(model_id, "adapter_model.bin")
-        lora_weights = torch.load(lora_ckpt)
+        lora_ckpt = os.path.join(model_id, "adapter_model.safetensors")
+        # lora_weights = torch.load(lora_ckpt)
+        lora_weights = load_file(lora_ckpt)
         set_peft_model_state_dict(self, lora_weights)
         print('LoRA weights have been loaded')
 

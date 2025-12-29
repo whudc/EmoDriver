@@ -69,6 +69,7 @@ CONFIG_PATH = '../../nuplan/planning/script/config/simulation'
 CONFIG_NAME = 'default_simulation'
 sim_path = args.simulation_root_path
 if args.type is not None:
+    print(sim_path)
     if not os.path.exists(Path(sim_path) / 'simulation' / args.save_dir):
         os.makedirs(Path(sim_path) / 'simulation' / args.save_dir, exist_ok=True)
     SAVE_DIR = Path(sim_path) / 'simulation' / args.save_dir / case_type[args.type]
@@ -102,7 +103,7 @@ DATASET_PARAMS = [
 ]
 
 # Name of the experiment
-EXPERIMENT = 'llama4drive_experiment'
+EXPERIMENT = 'qwen4drive_experiment'
 
 # Initialize configuration management system
 hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized

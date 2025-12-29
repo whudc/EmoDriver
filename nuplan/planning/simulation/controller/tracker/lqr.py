@@ -350,8 +350,10 @@ class LQRTracker(AbstractTracker):
             g=g,
             angle_diff_indices=[idx_heading_error, idx_steering_angle],
         )
+        # print(type(steering_rate_cmd))
+        # print(np.shape(steering_rate_cmd))
 
-        return float(steering_rate_cmd)
+        return float(steering_rate_cmd[0])
 
     @staticmethod
     def _solve_one_step_lqr(

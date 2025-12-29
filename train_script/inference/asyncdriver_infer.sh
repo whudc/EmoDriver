@@ -1,7 +1,7 @@
-CUDA_VISIBLE_DEVICES=$1 python train_script/inference/simulator_llama4drive.py \
---planner llama2/output/llm_load_pretrain_lora_gameformer/checkpoint-2100 \
---base_model llama2/llama-2-13b-chat-hf \
---planner_type llama4drive_lora_ins_wo_stop \
+CUDA_VISIBLE_DEVICES=$1 python train_script/inference/simulator_qwen4drive.py \
+--planner qwen/output/llm_load_pretrain_lora_gameformer_qwen/checkpoint-16875 \
+--base_model qwen/qwen/Qwen3-8B \
+--planner_type qwen4drive_lora_ins_wo_stop \
 --save_dir asyncdriver_self_2 \
 --ins_wo_stop \
 --short_ins 30 \

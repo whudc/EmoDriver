@@ -1,6 +1,6 @@
 """
 Simulator script for true asynchronous AsyncDriver
-Based on simulator_llama4drive.py with async support
+Based on simulator_qwen4drive.py with async support
 """
 
 # IMPORTANT: Set multiprocessing start method BEFORE any other imports
@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument('--openloop', '-o', action='store_true')
     parser.add_argument('--planner', '-p', type=str, default=None, help='Path to planner checkpoint')
     parser.add_argument('--save_dir', type=str, default=None, help='Save directory name')
-    parser.add_argument('--planner_type', type=str, default='llama4drive_async', help='Planner type')
+    parser.add_argument('--planner_type', type=str, default='qwen4drive_async', help='Planner type')
     parser.add_argument('--ref', type=str, default=None)
     parser.add_argument('--type', type=int, default=None, help='Scenario type (0-13)')
 
@@ -66,7 +66,7 @@ def parse_args():
     parser.add_argument('--disable_refpath', action='store_true')
     parser.add_argument('--ins_wo_stop', action='store_true')
     parser.add_argument('--refine', action='store_true')
-    parser.add_argument('--base_model', type=str, default=None, help='Path to base LLaMA model')
+    parser.add_argument('--base_model', type=str, default=None, help='Path to base Qwen model')
     parser.add_argument('--simulation_root_path', type=str, default=None,
                        help='Root path for simulation results')
 
@@ -148,11 +148,11 @@ if __name__ == '__main__':
     # Name of the experiment
     if args.async_mode:
         if args.llm_interval <= 0:
-            EXPERIMENT = 'llama4drive_async_event_driven'
+            EXPERIMENT = 'qwen4drive_async_event_driven'
         else:
-            EXPERIMENT = f'llama4drive_async_experiment_{args.llm_interval}s'
+            EXPERIMENT = f'qwen4drive_async_experiment_{args.llm_interval}s'
     else:
-        EXPERIMENT = 'llama4drive_experiment'
+        EXPERIMENT = 'qwen4drive_experiment'
 
     # Initialize configuration management system
     hydra.core.global_hydra.GlobalHydra.instance().clear()

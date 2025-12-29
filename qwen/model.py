@@ -143,9 +143,7 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
             past_key_values=past_key_values,
-            use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
         )
@@ -166,12 +164,12 @@ class Qwen3PreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["Qwen3DecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
-    # _supports_flash_attn = True
-    # _supports_sdpa = True
-    # _supports_flex_attn = True
+    _supports_flash_attn = True
+    _supports_sdpa = True
+    _supports_flex_attn = True
 
-    # _can_compile_fullgraph = True
-    # _supports_attention_backend = True
+    _can_compile_fullgraph = True
+    _supports_attention_backend = True
     _can_record_outputs = {
         "hidden_states": Qwen3DecoderLayer,
         "attentions": Qwen3Attention,
@@ -366,29 +364,7 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         self.map_insize = config.map_insize
         self.map_adapter = nn.Linear(self.map_insize, config.hidden_size, bias=False)
 
-        # set number weight
-        try:
-            number_weight = config.number_weight
-        except:
-            number_weight = 1.0
-        weighted_mask = torch.ones(config.vocab_size, dtype=torch.float32)
-        if number_weight > 1:
-            number_tokens = [
-                448,
-                29900,
-                29889,
-                29896,
-                29906,
-                29941,
-                29946,
-                29945,
-                29953,
-                29955,
-                29947,
-                29929,
-            ]  # -0.123456789
-            weighted_mask[number_tokens] = number_weight
-        self.weighted_mask = weighted_mask
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -407,11 +383,11 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         logits_to_keep: Union[int, torch.Tensor] = 0,
     ) -> Union[Tuple, CausalLMOutputWithPastWithModel]:
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        # output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        # output_hidden_states = (
+        #     output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        # )
+        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if map_feats is not None:
             map_feats = map_feats.to(self.map_adapter.weight.dtype)
@@ -427,31 +403,23 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            cache_position=cache_position,
+            # output_attentions=output_attentions,
+            # output_hidden_states=output_hidden_states,
+            # return_dict=return_dict,
         )
 
-        hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
-        logits = logits.float()
+        hidden_states = outputs.last_hidden_state
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss(self.weighted_mask.to(shift_logits.device))
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size)
 
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
+        # if not return_dict:
+        #     output = (logits,) + outputs[1:]
+        #     return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPastWithModel(
             loss=loss,

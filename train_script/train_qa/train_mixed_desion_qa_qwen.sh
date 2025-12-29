@@ -4,8 +4,8 @@ MASTER_PORT=29542
 
 deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen_trainer.py \
 --model_name_or_path qwen/qwen/Qwen3-8B \
---train_files llama2/data/mixed_decision_driveqa_train_epoch3.json \
---validation_files llama2/data/mixed_decision_driveqa_val.json \
+--train_files data/mixed_decision_driveqa_train_epoch3.json \
+--validation_files data/mixed_decision_driveqa_val.json \
 --ckpt_path qwen/output/drive_qa/ \
 --per_device_train_batch_size 2 \
 --per_device_eval_batch_size 1 \

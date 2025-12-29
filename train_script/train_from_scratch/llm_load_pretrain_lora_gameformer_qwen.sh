@@ -4,17 +4,17 @@ task_name=$(basename "$0" .sh)
 PYTHONPATH=.
 MASTER_PORT=29520
 
-deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen4driver_trainer.py \
+deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen4drive_trainer.py \
 --model_name_or_path qwen/qwen/Qwen3-8B \
---train_files  data/stage1_train_180k_processed.json \
---validation_files data/stage1_val_20k_processed.json \
+--train_files  data/stage1_train_180k_processed_fixed.json \
+--validation_files data/stage1_val_20k_processed_fixed.json \
 --feature_len 80 \
 --use_all_tokens False \
 --adapter_fusion True \
 --enable_lora True \
 --ins_wo_stop True \
 --lora_r 8 \
---per_device_train_batch_size 64 \
+--per_device_train_batch_size 8 \
 --per_device_eval_batch_size 1 \
 --do_train \
 --use_fast_tokenizer False \
@@ -44,7 +44,7 @@ deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen4drive
 --map_input_size 256 \
 --deepspeed ${root_dir}/ds_config.json \
 --ddp_timeout 18000000 \
---gameformer_ckpt training_log/Exp_ckpt/model_epoch_46_valADE_1.1090.pth \
+--gameformer_ckpt training_log/qwen/model_epoch_46_valADE_1.1090.pth \
 --lora_ckpt qwen/output/mix_driveqa_decision/adapter_model.safetensors \
 # # debug
 # --max_train_samples 200 \
