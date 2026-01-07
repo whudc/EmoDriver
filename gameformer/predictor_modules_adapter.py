@@ -110,6 +110,7 @@ class SelfTransformer(nn.Module):
         super(SelfTransformer, self).__init__()
         self.self_attention = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.llm_adapt_attention = AdaptiveBlock()
+        # self.llm_adapt_attention = ReliabilityAwareBlock()
         self.norm_1 = nn.LayerNorm(dim)
         self.norm_2 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim*4, dim), nn.Dropout(dropout))
@@ -141,6 +142,7 @@ class CrossTransformer(nn.Module):
         super(CrossTransformer, self).__init__()
         self.cross_attention = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.llm_adapt_attention = AdaptiveBlock()
+        # self.llm_adapt_attention = ReliabilityAwareBlock()
         self.norm_1 = nn.LayerNorm(dim)
         self.norm_2 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim*4, dim), nn.Dropout(dropout))
@@ -164,6 +166,8 @@ class CrossTransformer(nn.Module):
 class AdaptiveBlock(nn.Module):
     def __init__(self, heads=8, dim=256):
         super().__init__()
+        self.dim = dim
+        self.heads = heads
         self.head_dim = dim // heads
         self.gate = torch.nn.Parameter(torch.zeros(1, heads, 1, 1, device='cuda'))
         self.n_local_heads = heads
@@ -174,21 +178,15 @@ class AdaptiveBlock(nn.Module):
         self.wq = nn.Linear(dim, heads * self.head_dim)
         self.wk = nn.Linear(dim, heads * self.head_dim)
         self.wv = nn.Linear(dim, heads * self.head_dim)
-        self.wo = nn.Linear(heads * self.head_dim, dim)
+        # self.wo = nn.Linear(heads * self.head_dim, dim)
         
     def forward(self, query, llm_feature, output):
         bsz, adapter_len = llm_feature.shape[0], llm_feature.shape[1]
         seqlen = output.shape[1]
-        
-        projected_query = self.wq(query)
-        projected_query = projected_query.view(bsz, -1, self.n_local_heads, self.head_dim)
-        adapter_k = self.wk(llm_feature)
-        adapter_k = adapter_k.view(bsz, adapter_len, self.n_local_heads, self.head_dim)
-        adapter_v = self.wv(llm_feature)
-        adapter_v = adapter_v.view(bsz, adapter_len, self.n_local_heads, self.head_dim)
-        projected_query = projected_query.transpose(1, 2)
-        adapter_k = adapter_k.transpose(1, 2)
-        adapter_v = adapter_v.transpose(1, 2)
+
+        projected_query = self.wq(query).view(bsz, -1, self.n_local_heads, self.head_dim).transpose(1, 2)
+        adapter_k = self.wk(llm_feature).view(bsz, adapter_len, self.n_local_heads, self.head_dim).transpose(1, 2)
+        adapter_v = self.wv(llm_feature).view(bsz, adapter_len, self.n_local_heads, self.head_dim).transpose(1, 2)
         
         # adaptive_attention = self.gate[
         #         :, self.head_start : self.head_end
@@ -211,6 +209,62 @@ class AdaptiveBlock(nn.Module):
             scores = F.softmax(scores.float(), dim=-1).type_as(q)
             output = torch.matmul(scores, v)
             return output
+
+    
+# class ReliabilityAwareBlock(nn.Module):
+#     def __init__(self, heads=8, dim=256):
+#         super().__init__()
+#         self.heads = heads
+#         self.dim = dim
+#         self.head_dim = dim // heads
+
+#         # static head-wise gate
+#         self.gate = nn.Parameter(torch.zeros(1, heads, 1, 1))
+
+#         self.wq = nn.Linear(dim, heads * self.head_dim)
+#         self.wk = nn.Linear(dim, heads * self.head_dim)
+#         self.wv = nn.Linear(dim, heads * self.head_dim)
+
+#     def forward(self, query, llm_feature, output):
+#         bsz, seqlen = query.shape[:2]
+#         adapter_len = llm_feature.shape[1]
+
+#         q = self.wq(query).view(bsz, seqlen, self.heads, self.head_dim).transpose(1, 2)
+#         k = self.wk(llm_feature).view(bsz, adapter_len, self.heads, self.head_dim).transpose(1, 2)
+#         v = self.wv(llm_feature).view(bsz, adapter_len, self.heads, self.head_dim).transpose(1, 2)
+
+#         # -------- manual attention (needed for entropy) --------
+#         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+#         attn = F.softmax(scores, dim=-1)
+
+#         # -------- fast reliability from entropy --------
+#         # attn: [B, H, T, A]
+#         entropy = -(attn * (attn + 1e-9).log()).sum(dim=-1)  # [B, H, T]
+#         entropy = entropy.mean(dim=-1, keepdim=True)        # [B, H, 1]
+
+#         max_entropy = math.log(adapter_len)
+#         confidence = 1.0 - entropy / max_entropy            # [B, H, 1]
+#         confidence = confidence.unsqueeze(-1)               # [B, H, 1, 1]
+
+#         # -------- gated injection --------
+#         adaptive_attention = (self.gate * confidence).tanh() * torch.matmul(attn, v)
+
+#         adaptive_attention = adaptive_attention.transpose(1, 2).contiguous()
+#         adaptive_attention = adaptive_attention.view(bsz, seqlen, -1)
+
+#         output = output + adaptive_attention
+#         return output
+    
+#     def _forward_scaled_dot_product_attention(self, q, k, v, mask=None):
+#         if hasattr(F, "scaled_dot_product_attention"):
+#             return F.scaled_dot_product_attention(q, k, v, mask >= 0 if mask is not None else None)
+#         else:
+#             scores = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
+#             if mask is not None:
+#                 scores = scores + mask
+#             scores = F.softmax(scores.float(), dim=-1).type_as(q)
+#             output = torch.matmul(scores, v)
+#             return output
 
 
 class InitialPredictionDecoder(nn.Module):

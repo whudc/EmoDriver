@@ -50,8 +50,10 @@ logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
-from gameformer.predictor_modules_adapter import CrossTransformer, SelfTransformer, AdaptiveBlock
+from gameformer.predictor_modules_adapter import AdaptiveBlock
 
+
+# from gameformer.predictor_modules_adapter import ReliabilityAwareBlock
 
 @dataclass
 class ModelArguments:
@@ -159,15 +161,7 @@ class ModelArguments:
             "choices": ["auto", "bfloat16", "float16", "float32"],
         },
     )
-    
-    number_weight: Optional[float] = field(
-        default=1.0,
-        metadata={
-            "help": (
-                "The weight of number."
-            )
-        },
-    )
+
 
 @dataclass
 class DataTrainingArguments:
@@ -362,7 +356,6 @@ def main():
     
     ##############################
     config.map_insize = model_args.map_input_size
-    config.number_weight = model_args.number_weight
     if model_args.enable_lora:
         if model_args.layers_to_transform is not None:
             model_args.layers_to_transform = [int(num) for num in model_args.layers_to_transform.strip().split(',')]
@@ -705,6 +698,8 @@ def main():
             for module in model.gameformer.modules():
                 if isinstance(module, AdaptiveBlock):
                     module.gate = torch.nn.Parameter(torch.zeros(1, 8, 1, 1, device='cuda'))
+                # if isinstance(module, ReliabilityAwareBlock):
+                #     module.gate = torch.nn.Parameter(torch.zeros(1, 8, 1, 1, device='cuda'))
         
         if config.gameformer_ckpt is not None:
             model.resume_from_checkpoint(config.gameformer_ckpt, gameformer_ckpt=True)

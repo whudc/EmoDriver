@@ -18,7 +18,7 @@ from gameformer.obs_adapter import *
 from gameformer.state_lattice_planner import LatticePlanner
 
 from qwen.planner.async_llm_manager import AsyncLLMManager
-
+from qwen.planner.qwen4drive_planner import ilqr_replan_if_collision
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.actor_state.state_representation import StateSE2
 from nuplan.common.maps.abstract_map import AbstractMap
@@ -221,16 +221,16 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
                 plan = torch.from_numpy(output_data['plan']).to(self.gameformer_device) \
                     if output_data['plan'] is not None else None
 
-            if self.total_iterations % 10 == 0:
-                logging.info(f"[Async] LLM iter {output_data.get('iteration', -1)}, "
-                           f"LLM time: {output_data.get('inference_time', 0):.3f}s, wait: {wait_time:.4f}s")
+            # if self.total_iterations % 10 == 0:
+            #     logging.info(f"[Async] LLM iter {output_data.get('iteration', -1)}, "
+            #                f"LLM time: {output_data.get('inference_time', 0):.3f}s, wait: {wait_time:.4f}s")
 
         else:
             start_time = time.perf_counter()
             output = self._model.inference(features, ref_path, cur_iter)
             predictions = output.predictions
             plan = output.llm_plan if self.llm_plan else output.plan
-            logging.info(f"[Sync] LLM time: {time.perf_counter() - start_time:.3f}s")
+            # logging.info(f"[Sync] LLM time: {time.perf_counter() - start_time:.3f}s")
 
         # Extract level-k predictions
         if predictions is not None:
@@ -369,7 +369,7 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
                     states = transform_predictions_to_states(plan, history.ego_states, self._future_horizon, 0.1)
                     trajectory = InterpolatedTrajectory(states)
                 else:
-                    logging.info(f"Iter {self.iteration}: Max score={max_score:.3f}, cost={corr_cost:.3f}")
+                    # logging.info(f"Iter {self.iteration}: Max score={max_score:.3f}, cost={corr_cost:.3f}")
                     trajectory = max_traj
             else:
                 # Single path
@@ -427,17 +427,24 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
 
         total_time = time.time() - s
         self._compute_trajectory_runtimes.append(total_time)
-
+        # trajectory = ilqr_replan_if_collision(
+        #     ego_state=ego_state,
+        #     trajectory=trajectory,
+        #     observation=observation,
+        #     history=history,
+        #     future_horizon=self._future_horizon,
+        #     dt=0.1,
+        # )
         # Log stats every 50 iterations
-        if iteration % 50 == 0 and iteration > 0:
-            avg_llm_wait = np.mean(self.llm_wait_times[-50:]) if self.llm_wait_times else 0
-            avg_gameformer = np.mean(self.gameformer_times[-50:]) if self.gameformer_times else 0
-            logging.info(
-                f"[Stats] Iter {iteration}: Total={total_time:.3f}s, "
-                f"Avg LLM wait={avg_llm_wait:.4f}s, Avg GameFormer={avg_gameformer:.3f}s"
-            )
+        # if iteration % 50 == 0 and iteration > 0:
+        #     avg_llm_wait = np.mean(self.llm_wait_times[-50:]) if self.llm_wait_times else 0
+        #     avg_gameformer = np.mean(self.gameformer_times[-50:]) if self.gameformer_times else 0
+            # logging.info(
+            #     f"[Stats] Iter {iteration}: Total={total_time:.3f}s, "
+            #     f"Avg LLM wait={avg_llm_wait:.4f}s, Avg GameFormer={avg_gameformer:.3f}s"
+            # )
 
-        logging.error(f'Iteration {iteration}: {total_time:.3f}s')
+        # logging.error(f'Iteration {iteration}: {total_time:.3f}s')
 
         return trajectory
 

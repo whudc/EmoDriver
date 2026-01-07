@@ -197,7 +197,7 @@ class Qwen2DriveModel:
                 elif 'stop' in nav_inst:
                     cmd = np.array([0, 0, 0, 1])
                 else:
-                    import ipdb; ipdb.set_trace()
+                    import pdb; pdb.set_trace()
             except:
                 cmd = np.array([1, 0, 0, 0])
             logging.info(cmd)

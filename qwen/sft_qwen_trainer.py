@@ -148,15 +148,7 @@ class ModelArguments:
             "choices": ["auto", "bfloat16", "float16", "float32"],
         },
     )
-    
-    number_weight: Optional[float] = field(
-        default=1.0,
-        metadata={
-            "help": (
-                "The weight of number."
-            )
-        },
-    )
+
 
 @dataclass
 class DataTrainingArguments:
@@ -423,7 +415,6 @@ def main():
     
     ##############################
     config.map_insize = model_args.map_input_size
-    config.number_weight = model_args.number_weight
     if model_args.layers_to_transform is not None:
         model_args.layers_to_transform = [int(num) for num in model_args.layers_to_transform.strip().split(',')]
     lora_config = LoraConfig(

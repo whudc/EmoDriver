@@ -303,6 +303,7 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         self.map_insize = config.map_insize
         self.map_adapter = nn.Linear(self.map_insize, config.hidden_size, bias=False)
 
+
         self.waypoints_predictor = nn.Sequential(nn.Linear(self.model.config.hidden_size, 256),
                                                     nn.ELU(),
                                                     nn.Dropout(0.1),
@@ -574,22 +575,22 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         predicted_neighbour_lane = self.neighbour_lane(hidden_states)
         predicted_neighbour_lane = predicted_neighbour_lane.reshape(predicted_neighbour_lane.shape[0], 2)
         if not inference:
-            neighbour_lane_loss = F.binary_cross_entropy(predicted_neighbour_lane, torch.tensor(neighbour_lane.squeeze(-1), dtype=torch.float32))
+            neighbour_lane_loss = F.binary_cross_entropy(predicted_neighbour_lane, neighbour_lane.squeeze(-1))
         
         pred_acc_classification = self.acc_classification(hidden_states)
         pred_acc_classification = pred_acc_classification.reshape(pred_acc_classification.shape[0], 3)
         if not inference:
-            acc_class_loss = F.cross_entropy(pred_acc_classification, torch.tensor(acc_classification, dtype=torch.float32))
+            acc_class_loss = F.cross_entropy(pred_acc_classification, acc_classification)
         
         pred_lane_change = self.lane_change(hidden_states)
         pred_lane_change = pred_lane_change.reshape(pred_lane_change.shape[0], 1)
         if not inference:
-            lane_change_loss = F.binary_cross_entropy(pred_lane_change, torch.tensor(lane_change, dtype=torch.float32))
+            lane_change_loss = F.binary_cross_entropy(pred_lane_change, lane_change)
         
         pred_traffic_light = self.traffic_light(hidden_states)
         pred_traffic_light = pred_traffic_light.reshape(pred_traffic_light.shape[0], 4)
         if not inference:
-            traffic_light_loss = F.cross_entropy(pred_traffic_light, torch.tensor(traffic_light, dtype=torch.float32))
+            traffic_light_loss = F.cross_entropy(pred_traffic_light, traffic_light)
         
         if not inference:
             llm_multi_head_loss = v_a_loss + neighbour_lane_loss + acc_class_loss + lane_change_loss + traffic_light_loss
@@ -814,30 +815,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         self.config.vocab_size = model_embeds.weight.shape[0]
         self.vocab_size = model_embeds.weight.shape[0]
         
-        # Resize label weight
-        if hasattr(self, "weighted_mask"):
-            try:
-                number_weight = self.config.number_weight
-            except:
-                number_weight = 1.0
-            weighted_mask = torch.ones(self.config.vocab_size, dtype=torch.float32)
-            if number_weight > 1:
-                number_tokens = [
-                    448,
-                    29900,
-                    29889,
-                    29896,
-                    29906,
-                    29941,
-                    29946,
-                    29945,
-                    29953,
-                    29955,
-                    29947,
-                    29929,
-                ]  # -0.123456789
-                weighted_mask[number_tokens] = number_weight
-            self.weighted_mask = weighted_mask
 
         # Tie weights again if needed
         self.tie_weights()
