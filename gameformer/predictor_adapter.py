@@ -74,7 +74,7 @@ class Decoder(nn.Module):
         # level-k reasoning
         self.interaction_stage = nn.ModuleList([InteractionDecoder(modalities, future_encoder) for _ in range(levels)])
 
-    def forward(self, encoder_outputs, llm_feature=None):
+    def forward(self, encoder_outputs, llm_feature=None, pad_pred=None):
         decoder_outputs = {}
         current_states = encoder_outputs['actors'][:, :, -1] # 1 21(ego+agents) 5(xyzvxvy)
         encoding, mask = encoder_outputs['encoding'], encoder_outputs['mask']
@@ -83,7 +83,7 @@ class Decoder(nn.Module):
         #     encoding = torch.cat([encoding, llm_feature], dim=1)
 
         # level 0 decode
-        last_content, last_level, last_score = self.initial_predictor(current_states, encoding, mask, llm_feature)
+        last_content, last_level, last_score = self.initial_predictor(current_states, encoding, mask, llm_feature, pad_pred)
         # query_content, predictions, scores
         decoder_outputs['level_0_interactions'] = last_level
         decoder_outputs['level_0_scores'] = last_score
@@ -91,7 +91,7 @@ class Decoder(nn.Module):
         # level k reasoning
         for k in range(1, self.levels+1):
             interaction_decoder = self.interaction_stage[k-1]
-            last_content, last_level, last_score = interaction_decoder(current_states, last_level, last_score, last_content, encoding, mask, llm_feature)
+            last_content, last_level, last_score = interaction_decoder(current_states, last_level, last_score, last_content, encoding, mask, llm_feature, pad_pred)
             decoder_outputs[f'level_{k}_interactions'] = last_level
             decoder_outputs[f'level_{k}_scores'] = last_score
         
@@ -108,11 +108,11 @@ class NeuralPlanner(nn.Module):
         self.route_fusion = CrossTransformer()
         self.plan_decoder = nn.Sequential(nn.Linear(512, 256), nn.ELU(), nn.Dropout(0.1), nn.Linear(256, self._future_len*2))
 
-    def forward(self, env_encoding, route_lanes, llm_feature):
+    def forward(self, env_encoding, route_lanes, llm_feature, pad_pred):
         route_lanes, mask = self.route_encoder(route_lanes)
         mask[:, 0] = False
         env_encoding = torch.max(env_encoding, dim=1, keepdim=True)[0]
-        route_encoding = self.route_fusion(env_encoding, route_lanes, route_lanes, mask, llm_feature)
+        route_encoding = self.route_fusion(env_encoding, route_lanes, route_lanes, mask, llm_feature, pad_pred)
         env_route_encoding = torch.cat([env_encoding, route_encoding], dim=-1)
         plan = self.plan_decoder(env_route_encoding.squeeze(1))
         plan = plan.reshape(plan.shape[0], self._future_len, 2)
@@ -144,27 +144,27 @@ class LLMEnhancedGameFormer_Adapter(nn.Module):
         self.decoder = Decoder(neighbors, modalities, decoder_levels)
         self.planner = NeuralPlanner()
 
-    def forward_not_share_encoder(self, inputs, llm_feature):
+    def forward_not_share_encoder(self, inputs, llm_feature, pad_pred):
         # TODO: add fusion module
         encoder_outputs = self.encoder(inputs)
         route_lanes = encoder_outputs['route_lanes']
-        decoder_outputs, env_encoding = self.decoder(encoder_outputs, llm_feature=llm_feature)
-        ego_plan = self.planner(env_encoding, route_lanes, llm_feature)
+        decoder_outputs, env_encoding = self.decoder(encoder_outputs, llm_feature=llm_feature, pad_pred=pad_pred)
+        ego_plan = self.planner(env_encoding, route_lanes, llm_feature, pad_pred)
 
         return decoder_outputs, ego_plan
     
-    def forward_share_encoder(self, encoder_outputs, llm_feature):
+    def forward_share_encoder(self, encoder_outputs, llm_feature, pad_pred):
         # TODO: add fusion module
         route_lanes = encoder_outputs['route_lanes']
-        decoder_outputs, env_encoding = self.decoder(encoder_outputs, llm_feature=llm_feature)
-        ego_plan = self.planner(env_encoding, route_lanes, llm_feature)
+        decoder_outputs, env_encoding = self.decoder(encoder_outputs, llm_feature=llm_feature, pad_pred=pad_pred)
+        ego_plan = self.planner(env_encoding, route_lanes, llm_feature, pad_pred)
 
         return decoder_outputs, ego_plan
     
     def forward(self, input):
         if self.share_encoder:
-            encoder_outputs, llm_feature = input
-            return self.forward_share_encoder(encoder_outputs, llm_feature)
+            encoder_outputs, llm_feature, pad_pred = input
+            return self.forward_share_encoder(encoder_outputs, llm_feature, pad_pred)
         else:
-            raw_inputs, llm_feature = input
-            return self.forward_not_share_encoder(raw_inputs, llm_feature)
+            raw_inputs, llm_feature, pad_pred = input
+            return self.forward_not_share_encoder(raw_inputs, llm_feature, pad_pred)

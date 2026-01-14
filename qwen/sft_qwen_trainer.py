@@ -58,6 +58,7 @@ class ModelArguments:
             )
         },
     )
+    dataset_cache: Optional[str] = field(default=None, metadata={"help": "Path to the dataset cache"})
     ckpt_path: Optional[str] = field(
         default=None,
         metadata={
@@ -529,13 +530,28 @@ def main():
             tokenized_full_prompt["map_masks"] = torch.from_numpy(map_masks).squeeze(0)
         
         return tokenized_full_prompt
-    
     with training_args.main_process_first(desc="dataset map tokenization"):
-        tokenized_datasets = raw_datasets.map(
-            generate_and_tokenize_prompt,
-            batched=False,
-            remove_columns=column_names,
-        )
+        if model_args.dataset_cache is not None:
+            try:
+                from datasets import load_from_disk
+                tokenized_datasets = load_from_disk(model_args.dataset_cache)
+                print(f"!!!!!!!!!!  ----------------- Loading dataset from {model_args.dataset_cache}")
+            except FileNotFoundError:
+                tokenized_datasets = raw_datasets.map(
+                    generate_and_tokenize_prompt,
+                    batched=False,
+                    remove_columns=column_names,
+                    num_proc=32
+                )
+                tokenized_datasets.save_to_disk(model_args.dataset_cache)
+                logging.info(f"Saving dataset to {model_args.dataset_cache}")
+        else:
+            tokenized_datasets = raw_datasets.map(
+                    generate_and_tokenize_prompt,
+                    batched=False,
+                    remove_columns=column_names,
+                    num_proc=32
+                )
 
     if data_args.block_size is None:
         block_size = tokenizer.model_max_length

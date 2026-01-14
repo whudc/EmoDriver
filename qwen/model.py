@@ -493,6 +493,9 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        output_attentions = None,
+        output_hidden_states = None,
+        return_dict = None,
     ) -> Union[Tuple, CausalLMOutputWithPastWithModel]:
 
         # output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -799,10 +802,10 @@ class MapPeftModelForCausalLM(PeftModelForCausalLM):
     ):
         from qwen.mapping import MODEL_TYPE_TO_PEFT_MODEL_MAPPING, PEFT_TYPE_TO_CONFIG_MAPPING
 
-        # 如何kwargs中存在output_attentions, output_hidden_states和return_dict，则删除
-        kwargs.pop("output_attentions", None)
-        kwargs.pop("output_hidden_states", None)
-        kwargs.pop("return_dict", None)
+        # # 如何kwargs中存在output_attentions, output_hidden_states和return_dict，则删除
+        # kwargs.pop("output_attentions", None)
+        # kwargs.pop("output_hidden_states", None)
+        # kwargs.pop("return_dict", None)
 
         # load the config
         if config is None:

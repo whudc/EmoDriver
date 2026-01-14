@@ -276,6 +276,7 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
     _keep_in_fp32_modules = ['map_adapter',
                             #  'waypoints_fc',
                              'waypoints_predictor',
+                             "pad_predictor",
                             #  'waypoints_output',
                              'map_encoder',
                              'gameformer',
@@ -302,6 +303,15 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         # Add Map adapter layers
         self.map_insize = config.map_insize
         self.map_adapter = nn.Linear(self.map_insize, config.hidden_size, bias=False)
+
+        # === PAD emotion inference head ===
+        self.pad_predictor = nn.Sequential(
+            nn.Linear(self.model.config.hidden_size, 128),
+            nn.ELU(),
+            nn.Dropout(0.1),
+            nn.Linear(128, 3),
+            nn.Sigmoid()   # P, A, D ∈ [0,1]
+        )
 
 
         self.waypoints_predictor = nn.Sequential(nn.Linear(self.model.config.hidden_size, 256),
@@ -559,7 +569,10 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         else:
             hidden_states = hidden_states[:, -1, :]
             predicted_feature = self.feature_adpter(hidden_states)
-            
+
+        pad_pred = self.pad_predictor(hidden_states)
+        if pad_pred is None:
+            import pdb; pdb.set_trace()
         # loss for llm hidden feature
         predicted_waypoints = self.waypoints_predictor(hidden_states)
         predicted_waypoints = predicted_waypoints.reshape(predicted_waypoints.shape[0], self.feature_len, 2)
@@ -613,7 +626,7 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         else:
             llm_feature = predicted_feature
 
-        input_t = (raw_map_vector, llm_feature)
+        input_t = (raw_map_vector, llm_feature, pad_pred)
         level_k_outputs, ego_plan = self.gameformer(input_t)
         
         if not inference:

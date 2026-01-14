@@ -115,7 +115,7 @@ class SelfTransformer(nn.Module):
         self.norm_2 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim*4, dim), nn.Dropout(dropout))
 
-    def forward(self, inputs, mask=None, llm_feature=None):
+    def forward(self, inputs, mask=None, llm_feature=None, pad_pred=None):
         if mask.dtype == torch.bool:
             # 将布尔mask转换为浮点mask
             # True表示需要mask (注意力权重设为-inf)，False表示不需要mask
@@ -131,7 +131,7 @@ class SelfTransformer(nn.Module):
         # call attention
         attention_output, attention_weights = self.self_attention(inputs, inputs, inputs, key_padding_mask=float_mask)
 
-        attention_output = self.llm_adapt_attention(inputs, llm_feature, attention_output)
+        attention_output = self.llm_adapt_attention(inputs, llm_feature, attention_output, pad_pred)
         attention_output = self.norm_1(attention_output + inputs)
         output = self.norm_2(self.ffn(attention_output) + attention_output)
         return output
@@ -147,7 +147,7 @@ class CrossTransformer(nn.Module):
         self.norm_2 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim*4, dim), nn.Dropout(dropout))
 
-    def forward(self, query, key, value, mask=None, llm_feature=None):
+    def forward(self, query, key, value, mask=None, llm_feature=None, pad_pred=None):
         attention_output, _ = self.cross_attention(query, key, value, key_padding_mask=mask)
         # W_q = self.cross_attention.in_proj_weight.chunk(3)
         # b_q, _, _ = self.cross_attention.in_proj_bias.chunk(3)
@@ -155,9 +155,9 @@ class CrossTransformer(nn.Module):
         if llm_feature is None:
             import pdb; pdb.set_trace()
             return attention_output
-        if (attention_output != self.llm_adapt_attention(query, llm_feature, attention_output)).any():
-            print('!!!!!!!!!!!!!!!!adapter has been updated!!!!!!!!!!!!!!!!')
-        attention_output = self.llm_adapt_attention(query, llm_feature, attention_output)
+        # if (attention_output != self.llm_adapt_attention(query, llm_feature, attention_output, pad_pred)).any():
+        #     print('!!!!!!!!!!!!!!!!adapter has been updated!!!!!!!!!!!!!!!!')
+        attention_output = self.llm_adapt_attention(query, llm_feature, attention_output, pad_pred)
         attention_output = self.norm_1(attention_output)
         output = self.norm_2(self.ffn(attention_output) + attention_output)
 
@@ -179,26 +179,54 @@ class AdaptiveBlock(nn.Module):
         self.wk = nn.Linear(dim, heads * self.head_dim)
         self.wv = nn.Linear(dim, heads * self.head_dim)
         # self.wo = nn.Linear(heads * self.head_dim, dim)
-        
-    def forward(self, query, llm_feature, output):
+        # === 新增：PAD → head-wise gate ===
+        self.pad_to_gate = nn.Sequential(
+            nn.Linear(3, 32),
+            nn.ELU(),
+            nn.Linear(32, heads),
+            nn.Sigmoid()   # 每个 head 一个 [0,1] 系数
+        )        
+        nn.init.constant_(self.pad_to_gate[2].bias, 0.5)
+
+
+    def forward(self, query, llm_feature, output, pad_pred):
         bsz, adapter_len = llm_feature.shape[0], llm_feature.shape[1]
         seqlen = output.shape[1]
 
-        projected_query = self.wq(query).view(bsz, -1, self.n_local_heads, self.head_dim).transpose(1, 2)
-        adapter_k = self.wk(llm_feature).view(bsz, adapter_len, self.n_local_heads, self.head_dim).transpose(1, 2)
-        adapter_v = self.wv(llm_feature).view(bsz, adapter_len, self.n_local_heads, self.head_dim).transpose(1, 2)
-        
-        # adaptive_attention = self.gate[
-        #         :, self.head_start : self.head_end
-        #     ].tanh().half() * self._forward_scaled_dot_product_attention(projected_query, adapter_k, adapter_v)
-        adaptive_attention = self.gate.tanh().half() * self._forward_scaled_dot_product_attention(projected_query, adapter_k, adapter_v)
-        adaptive_attention = adaptive_attention.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        # print((output == output+adaptive_attention).all())
-        output += adaptive_attention
-        
-        # return self.wo(output)
+        # QKV projection
+        projected_query = self.wq(query).view(
+            bsz, -1, self.heads, self.head_dim
+        ).transpose(1, 2)
+
+        adapter_k = self.wk(llm_feature).view(
+            bsz, adapter_len, self.heads, self.head_dim
+        ).transpose(1, 2)
+
+        adapter_v = self.wv(llm_feature).view(
+            bsz, adapter_len, self.heads, self.head_dim
+        ).transpose(1, 2)
+
+        # Cross-attention
+        attn = self._forward_scaled_dot_product_attention(
+            projected_query, adapter_k, adapter_v
+        )  # [B, heads, seq, head_dim]
+
+        # === PAD 调制 gate ===
+        # pad_pred: [B, 3]
+        pad_gate = self.pad_to_gate(pad_pred)          # [B, heads]
+        pad_gate = pad_gate.view(bsz, self.heads, 1, 1)
+
+        # static gate（可学习） + dynamic PAD gate
+        effective_gate = torch.tanh(self.gate) * pad_gate
+
+        adaptive_attention = effective_gate * attn
+        adaptive_attention = adaptive_attention.transpose(1, 2).contiguous()
+        adaptive_attention = adaptive_attention.view(bsz, seqlen, -1)
+
+        output = output + adaptive_attention
         return output
-    
+
+        
     def _forward_scaled_dot_product_attention(self, q, k, v, mask=None):
         if hasattr(F, "scaled_dot_product_attention"):
             return F.scaled_dot_product_attention(q, k, v, mask >= 0 if mask is not None else None)
@@ -277,11 +305,11 @@ class InitialPredictionDecoder(nn.Module):
         self.predictor = GMMPredictor()
         self.register_buffer('modal', torch.arange(modalities).long())
 
-    def forward(self, current_states, encoding, mask, llm_feature):
+    def forward(self, current_states, encoding, mask, llm_feature, pad_pred):
         N = self._agents
         multi_modal_query = self.multi_modal_query_embedding(self.modal) #[6, 256]
         query = encoding[:, :N, None, :] + multi_modal_query[None, None, :, :] #[16, 11, 6, 256] [B,num_agent,modalities,ch]
-        query_content = torch.stack([self.query_encoder(query[:, i], encoding, encoding, mask, llm_feature) for i in range(N)], dim=1)
+        query_content = torch.stack([self.query_encoder(query[:, i], encoding, encoding, mask, llm_feature, pad_pred) for i in range(N)], dim=1)
         predictions, scores = self.predictor(query_content) #[16, 11, 6, 80, 4], ([16, 11, 6]
         predictions[..., :2] += current_states[:, :N, None, None, :2]
 
@@ -297,17 +325,17 @@ class InteractionDecoder(nn.Module):
         self.future_encoder = future_encoder
         self.decoder = GMMPredictor()
 
-    def forward(self, current_states, actors, scores, last_content, encoding, mask, llm_feature):
+    def forward(self, current_states, actors, scores, last_content, encoding, mask, llm_feature, pad_pred):
         # current_states, last_predictions, last_scores, last_query_content, encoding, mask
         N = actors.shape[1]
         multi_futures = self.future_encoder(actors[..., :2], current_states[:, :N]) #[16, 11, 6, 256]
         futures = (multi_futures * scores.softmax(-1).unsqueeze(-1)).mean(dim=2) #[16, 11, 256]
-        interaction = self.interaction_encoder(futures, mask[:, :N], llm_feature)
+        interaction = self.interaction_encoder(futures, mask[:, :N], llm_feature, pad_pred)
         encoding = torch.cat([interaction, encoding], dim=1)
         mask = torch.cat([mask[:, :N], mask], dim=1)
 
         query = last_content + multi_futures #[16, 11, 6, 256]
-        query_content = torch.stack([self.query_encoder(query[:, i], encoding, encoding, mask, llm_feature) for i in range(N)], dim=1)
+        query_content = torch.stack([self.query_encoder(query[:, i], encoding, encoding, mask, llm_feature, pad_pred) for i in range(N)], dim=1)
         trajectories, scores = self.decoder(query_content)
         trajectories[..., :2] += current_states[:, :N, None, None, :2]
 
