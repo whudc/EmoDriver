@@ -380,7 +380,7 @@ class ScenarioTab(BaseTab):
         self._scenario_metric_score_data = self._update_aggregation_metric()
         self._update_scenario_plot()
 
-    def _click_planner_checkbox_group(self, attr: Any) -> None:
+    def _click_planner_checkbox_group(self, attr: Any, old: Any, new: Any) -> None:
         """
         Click event handler for planner_checkbox_group.
         :param attr: Clicked attributes.

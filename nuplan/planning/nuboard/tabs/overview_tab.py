@@ -62,7 +62,7 @@ class OverviewTab(BaseTab):
 
         self._overview_on_change()
 
-    def _click_planner_checkbox_group(self, attr: Any) -> None:
+    def _click_planner_checkbox_group(self, attr: Any, old: Any, new: Any) -> None:
         """
         Click event handler for planner_checkbox_group.
         :param attr: Clicked attributes.

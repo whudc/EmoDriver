@@ -53,7 +53,7 @@ class BaseTab:
         self.planner_checkbox_group = CheckboxGroup(
             labels=[], active=[], inline=True, css_classes=["planner-checkbox-group"], sizing_mode="scale_both"
         )
-        self.planner_checkbox_group.on_click(self._click_planner_checkbox_group)
+        self.planner_checkbox_group.on_change("active", self._click_planner_checkbox_group)
 
     def file_paths_on_change(
         self, experiment_file_data: ExperimentFileData, experiment_file_active_index: List[int]
@@ -65,7 +65,7 @@ class BaseTab:
         """
         raise NotImplementedError
 
-    def _click_planner_checkbox_group(self, attr: Any) -> None:
+    def _click_planner_checkbox_group(self, attr: Any, old: Any, new: Any) -> None:
         """
         Click event handler for planner_checkbox_group.
         :param attr: Clicked attributes.

@@ -117,7 +117,7 @@ class HistogramTab(BaseTab):
         """Return histogram modal query button."""
         return self._histogram_modal_query_btn
 
-    def _click_planner_checkbox_group(self, attr: Any) -> None:
+    def _click_planner_checkbox_group(self, attr: Any, old: Any, new: Any) -> None:
         """
         Click event handler for planner_checkbox_group.
         :param attr: Clicked attributes.
