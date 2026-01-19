@@ -8,6 +8,7 @@ hydra:
 
 
 defaults:
+  - _self_
   - default_common
   - simulation_metric:
       - default_metrics

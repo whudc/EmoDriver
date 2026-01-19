@@ -2,7 +2,7 @@
 
 defaults:
   # Add common items
-  - scenario_builder: nuplan_mini
+  - scenario_builder: nuplan_trainval
   - scenario_filter: one_continuous_log
   - model: null
   # Worker that is used to run simulations
