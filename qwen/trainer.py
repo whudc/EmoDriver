@@ -1108,6 +1108,7 @@ class CustomTrainer(Trainer):
             if num_items_in_batch is not None:
                 kwargs["num_items_in_batch"] = num_items_in_batch
             inputs = {**inputs, **kwargs}
+        # import pdb;pdb.set_trace()
         outputs = model(**inputs)
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.

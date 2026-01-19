@@ -243,7 +243,26 @@ class DataTrainingArguments:
                 assert extension in ["csv", "json", "txt"], "`validation_file` should be a csv, a json or a txt file."
 
 
+_FLOAT_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
+def extract_pad_from_text(text: str, default=(0.0, 0.0, 0.0), strict: bool = False):
+    patterns = [
+        # 你的标准格式（允许有 "-"、允许 : 或 =，允许任意换行/空格）
+        rf"Pleasure\s*[:=]\s*({_FLOAT_RE}).*?"
+        rf"Arousal\s*[:=]\s*({_FLOAT_RE}).*?"
+        rf"Dominance\s*[:=]\s*({_FLOAT_RE})",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.S | re.I)
+        if m:
+            P, A, D = map(float, m.groups())
+            return np.array([P, A, D], dtype=np.float32)
+
+    if strict:
+        raise ValueError(f"PAD not found in input text (head): {text[:300]!r}")
+
+    return np.array(default, dtype=np.float32)
 def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     
@@ -385,7 +404,7 @@ def main():
         bnb_4bit_compute_dtype=torch.bfloat16
     )
 
-    torch_dtype = torch.float16
+    # torch_dtype = torch.float16
     model = Qwen3ForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -393,10 +412,11 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=None,
-        torch_dtype=torch_dtype,
+        # torch_dtype=torch_dtype,
         load_in_8bit=True if model_args.load_in_bits==8 else False,
         quantization_config=bnb_config if model_args.load_in_bits==4 else None,
-        device_map={"": int(os.environ.get("LOCAL_RANK") or 0)}
+        device_map={"": int(os.environ.get("LOCAL_RANK") or 0)},
+        trust_remote_code=True,  
     )
 
     if model_args.enable_lora:
@@ -448,7 +468,7 @@ def main():
         elif 'right' in input_text:
             input_text = input_text.replace('right', 'left')
         if config.ins_wo_stop:
-            pattern = r'Nevigation instructions:.*?\n\n'
+            pattern = r'Navigation instructions:.*?\n\n'
             match = re.search(pattern, input_text)
             if match:
                 start_index = match.start()
@@ -579,6 +599,9 @@ def main():
         tokenized_full_prompt["labels"] = [-100] * input_text_len + tokenized_full_prompt["labels"][input_text_len:]
         if map_info is not None:
             tokenized_full_prompt.update(input_dict)
+        pad_state = extract_pad_from_text(input_text)
+        pad_state = torch.from_numpy(pad_state)
+        tokenized_full_prompt["pad_state"] = pad_state
 
         return tokenized_full_prompt
 
@@ -614,6 +637,7 @@ def main():
 
     if training_args.do_train:
         train_dataset = tokenized_datasets["train"]
+        # import pdb; pdb.set_trace()
         if data_args.max_train_samples is not None:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
@@ -655,7 +679,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         # Data collator will default to DataCollatorWithPadding, so we change it.
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
@@ -665,8 +689,6 @@ def main():
         callbacks=(None),
         small_lr=model_args.small_lr,
     )
-
-    # metrics = trainer.evaluate()
 
     # Training
     if training_args.do_train:

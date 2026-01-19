@@ -212,14 +212,16 @@ class AdaptiveBlock(nn.Module):
         )  # [B, heads, seq, head_dim]
 
         # === PAD 调制 gate ===
-        # pad_pred: [B, 3]
-        pad_gate = self.pad_to_gate(pad_pred)          # [B, heads]
+        # === PAD gate ===
+        pad_gate = self.pad_to_gate(pad_pred)  # [B, heads]
         pad_gate = pad_gate.view(bsz, self.heads, 1, 1)
 
-        # static gate（可学习） + dynamic PAD gate
-        effective_gate = torch.tanh(self.gate) * pad_gate
+        # 改这里 ↓↓↓
+        effective_gate = 1.0 + 0.5 * (pad_gate - 0.5)
+        # ∈ [0.75, 1.25]，永不归零
 
         adaptive_attention = effective_gate * attn
+
         adaptive_attention = adaptive_attention.transpose(1, 2).contiguous()
         adaptive_attention = adaptive_attention.view(bsz, seqlen, -1)
 

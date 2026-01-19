@@ -92,10 +92,6 @@ class Qwen3PreTrainedModel(PreTrainedModel):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        if isinstance(module, Qwen3Model):
-            module.gradient_checkpointing = value
-
 class Qwen3Model(Qwen3PreTrainedModel):
     def __init__(self, config: Qwen3Config):
         super().__init__(config)
@@ -276,7 +272,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
     _keep_in_fp32_modules = ['map_adapter',
                             #  'waypoints_fc',
                              'waypoints_predictor',
-                             "pad_predictor",
                             #  'waypoints_output',
                              'map_encoder',
                              'gameformer',
@@ -298,20 +293,11 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         self.config = config
         self.vocab_size = config.vocab_size
         self.feature_len = config.feature_len
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         
         # Add Map adapter layers
         self.map_insize = config.map_insize
         self.map_adapter = nn.Linear(self.map_insize, config.hidden_size, bias=False)
 
-        # === PAD emotion inference head ===
-        self.pad_predictor = nn.Sequential(
-            nn.Linear(self.model.config.hidden_size, 128),
-            nn.ELU(),
-            nn.Dropout(0.1),
-            nn.Linear(128, 3),
-            nn.Sigmoid()   # P, A, D ∈ [0,1]
-        )
 
 
         self.waypoints_predictor = nn.Sequential(nn.Linear(self.model.config.hidden_size, 256),
@@ -450,15 +436,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         self.map_encoder.load_state_dict(processed_weights, strict=False)
         self.map_encoder.to(self.model.device)
 
-    def cuda(self, *args, **kwargs):
-        return nn.Module.cuda(self, *args, **kwargs)
-
-    def to(self, *args, **kwargs):
-        return nn.Module.to(self, *args, **kwargs)
-
-    def half(self, *args):
-        return nn.Module.half(self)
-
     def float(self, *args):
         return nn.Module.float(self)
 
@@ -495,6 +472,7 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        pad_state: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPastWithModel]:
 
         # output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -550,15 +528,15 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         level_k_outputs = None
         hidden_states = outputs.last_hidden_state
         
-        if isinstance(cur_iter, int):
-            cur_iter = cur_iter
-        else:
-            cur_iter = getattr(cur_iter, "index", 0)
+        # if isinstance(cur_iter, int):
+        #     cur_iter = cur_iter
+        # else:
+        #     cur_iter = getattr(cur_iter, "index", 0)
 
-        if cur_iter % self.llm_inf_step != 0:
-            hidden_states = self.prev_hidden_states
-        else:
-            self.prev_hidden_states = hidden_states
+        # if cur_iter % self.llm_inf_step != 0:
+        #     hidden_states = self.prev_hidden_states
+        # else:
+        #     self.prev_hidden_states = hidden_states
         
         # use query feature instead of direct hidden_states
         ########
@@ -570,9 +548,12 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             hidden_states = hidden_states[:, -1, :]
             predicted_feature = self.feature_adpter(hidden_states)
 
-        pad_pred = self.pad_predictor(hidden_states)
-        if pad_pred is None:
-            import pdb; pdb.set_trace()
+        if pad_state is None:
+            raise ValueError("pad_state must be provided explicitly")
+
+        pad_pred = pad_state.to(hidden_states.device)
+
+
         # loss for llm hidden feature
         predicted_waypoints = self.waypoints_predictor(hidden_states)
         predicted_waypoints = predicted_waypoints.reshape(predicted_waypoints.shape[0], self.feature_len, 2)
@@ -680,18 +661,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             selected_adapters: Optional[List[str]] = None,
             **kwargs: Any,
     ):
-        r"""
-        This function saves the map adapteer, along with the adapter model and the adapter configuration files to a directory, so that it can be
-        reloaded using the [`PeftModel.from_pretrained`] class method, and also used by the [`PeftModel.push_to_hub`]
-        method.
-
-        Args:
-            save_directory (`str`):
-                Directory where the adapter model and configuration files will be saved (will be created if it does not
-                exist).
-            kwargs (additional keyword arguments, *optional*):
-                Additional keyword arguments passed along to the `push_to_hub` method.
-        """
         if os.path.isfile(save_directory):
             raise ValueError(f"Provided path ({save_directory}) should be a directory, not a file")
 
@@ -852,6 +821,7 @@ class ModelWithLoRA(PeftModelForCausalLM):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        pad_state: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPastWithModel]:
 
@@ -863,6 +833,7 @@ class ModelWithLoRA(PeftModelForCausalLM):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            pad_state=pad_state,
             **kwargs,
         )
         return outputs

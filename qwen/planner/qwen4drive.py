@@ -142,6 +142,141 @@ def padding_token(input_ids_list, padding_id, padding_side='left'):
             raise ValueError('padding_side must be left or right!')
     return torch.tensor(input_ids_list)
 
+def clip(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, x))
+
+def infer_pad(
+    instruction="",
+    ego_v_a=None,                 # [4] vx, vy, ax, ay
+    ego_future=None,              # [T, 3]
+    neighbor_future=None,         # [N, T, 11]
+    traffic_light=None,           # one-hot
+    lane_change=None,             # [1]
+):
+    """
+    PAD ∈ [-1, 1], strictly matched to nuPlan/GameFormer NPZ format
+    """
+
+    # =====================================================
+    # Safety helpers
+    # =====================================================
+    def safe_array(x):
+        if x is None:
+            return None
+        if isinstance(x, np.ndarray):
+            return x
+        return np.array(x)
+
+    ego_future = safe_array(ego_future)
+    neighbor_future = safe_array(neighbor_future)
+    ego_v_a = safe_array(ego_v_a)
+
+    # =====================================================
+    # Arousal: collision risk / alertness
+    # =====================================================
+    arousal = 0.0
+
+    # --- neighbor distance risk ---
+    if (
+        ego_future is not None
+        and neighbor_future is not None
+        and neighbor_future.ndim == 3
+    ):
+        ego_xy = ego_future[:, :2]                 # [T, 2]
+        min_dist = np.inf
+
+        for i in range(neighbor_future.shape[0]):
+            agent = neighbor_future[i]
+            if np.all(agent == 0):
+                continue  # invalid agent
+
+            agent_xy = agent[:, :2]
+            T = min(len(ego_xy), len(agent_xy))
+            d = np.linalg.norm(ego_xy[:T] - agent_xy[:T], axis=-1)
+            min_dist = min(min_dist, float(d.min()))
+
+        if min_dist < np.inf:
+            arousal += np.tanh((6.0 - min_dist) / 3.0)
+
+    # --- traffic light risk (robust to string / one-hot) ---
+    if traffic_light is not None:
+        tl = traffic_light
+
+        has_red = False
+
+        # 情况 1：字符串 / object array
+        if isinstance(tl, (list, tuple, np.ndarray)) and not np.issubdtype(np.array(tl).dtype, np.number):
+            tl_list = [str(x).upper() for x in tl]
+            if any("RED" in x for x in tl_list):
+                has_red = True
+
+        # 情况 2：数值 one-hot
+        elif isinstance(tl, (list, tuple, np.ndarray)):
+            tl_arr = np.array(tl)
+            if tl_arr.ndim > 0 and tl_arr.sum() > 0:
+                has_red = True
+
+        if has_red:
+            arousal += 0.3
+
+
+    arousal = clip(arousal, 0.0, 1.0)
+    A = 2 * arousal - 1
+
+    # =====================================================
+    # Dominance: controllability / margin
+    # =====================================================
+    dominance = 0.0
+
+    if ego_future is not None and ego_v_a is not None:
+        # 当前速度
+        vx, vy, ax, ay = ego_v_a
+        speed = np.linalg.norm([vx, vy])
+
+        # 未来可用距离
+        diffs = np.diff(ego_future[:, :2], axis=0)
+        future_dist = np.sum(np.linalg.norm(diffs, axis=1))
+
+        # 制动距离
+        a_max = 6.0
+        brake_dist = speed ** 2 / (2 * a_max + 1e-3)
+
+        margin = (future_dist - brake_dist) / (future_dist + 1e-3)
+        dominance = np.clip(margin, 0.0, 1.0)
+
+        # 被动减速（失控感）
+        if ax * vx + ay * vy < -0.5:
+            dominance *= 0.7
+
+    D = 2 * dominance - 1
+
+    # =====================================================
+    # Pleasure: smoothness / comfort
+    # =====================================================
+    pleasure = 0.5
+
+    if ego_future is not None and len(ego_future) >= 4:
+        # jerk
+        dt = 0.1
+        vel = np.diff(ego_future[:, :2], axis=0) / dt
+        acc = np.diff(vel, axis=0) / dt
+        jerk = np.diff(acc, axis=0) / dt
+        mean_jerk = np.mean(np.linalg.norm(jerk, axis=-1))
+
+        pleasure -= np.tanh(mean_jerk / 5.0) * 0.4
+
+    # lane change penalty
+    if lane_change is not None:
+        lane_change = safe_array(lane_change)
+        if lane_change[0] == 1:
+            pleasure -= 0.2
+
+    pleasure = clip(pleasure, 0.0, 1.0)
+    P = 2 * pleasure - 1
+
+    return float(P), float(A), float(D)
+
+
 class Qwen2DriveModel:
     _instance = None
     _lock = threading.Lock()
@@ -170,7 +305,7 @@ class Qwen2DriveModel:
         cls.model_loaded = True
         cls.diversity = config.get('diversity_ins', False)
 
-    def generate_prompt(self, lane, return_navi=False):
+    def generate_prompt(self, lane, data, return_navi=False):
         if isinstance(lane, torch.Tensor):
             lane = lane.cpu().numpy()
         if self.ins_mode == 'None':
@@ -202,12 +337,27 @@ class Qwen2DriveModel:
                 cmd = np.array([1, 0, 0, 0])
             logging.info(cmd)
         logging.info(instruction)
+        instruction = data.get("instruction", "")
+        ego_v_a = data.get("ego_v_a", None)
+        ego_future = data.get("ego_agent_future", None)
+        neighbor_future = data.get("neighbor_agents_future", None)
+        traffic_light = data.get("traffic_light", None)
+        lane_change = data.get("lane_change", None)
+        P, A, D = infer_pad(instruction=instruction,
+                            ego_v_a=ego_v_a,
+                            ego_future=ego_future,
+                            neighbor_future=neighbor_future,
+                            traffic_light=traffic_light,
+                            lane_change=lane_change)
         messages = f"""
-    Role: You are now an autonomous driving driver, and I will provide you with the environment information including Ego Car Information, Agents Information and Map Information.\n\nEnvironment: <map>\n\nNevigation instructions: {instruction}. \n\nPlease predict the future waypoints of the ego car based on the given environmental information and nevigation instrucions.\n\nFinal Answer:\n
+    Role: Role: You are now an autonomous driving driver with emotion-aware capability. I will provide you with the environment information, including Ego Car Information, Agents Information, Map Information, and the current Driver Emotion State.\n\nDriver Emotion State (PAD): \n- Pleasure: {P}\n- Arousal: {A}\n- Dominance: {D}\n\nEnvironment: <map>\n\nNevigation instructions: {instruction}. \n\nPlease predict the future waypoints of the ego car based on the given environmental information, driver emotion state and nevigation instrucions.\n\nFinal Answer:\n
     """
+        pad_gt = [P, A, D]
+        pad_gt = torch.tensor([P, A, D], dtype=torch.float32)
+
         if return_navi:
             return messages, cmd
-        return messages
+        return messages, pad_gt
 
     def get_instruction(self, ego_future_poses, threshold=0.5, return_prompt=True, limit=99999999, diversity=False):
         # dis_norm = np.linalg.norm(np.diff(np.concatenate([ego_future_poses[:1,:-1], ego_future_poses[:,:-1]], axis=0), n=1, axis=0), axis=1)
@@ -287,7 +437,7 @@ class Qwen2DriveModel:
         if not hasattr(self, 'model_loaded') or not self.model_loaded:
             raise RuntimeError("Model not loaded properly.")
         tokenizer = self.tokenizer
-        messages = self.generate_prompt(ref_path)
+        messages, pad_gt = self.generate_prompt(ref_path, data)
         messages = messages.replace('<map>', '<map></map>')
         map_info = data
         input_dict = {
@@ -299,6 +449,7 @@ class Qwen2DriveModel:
             'ego_future': map_info.get('ego_agent_future', None),
             'neighbors_future': map_info.get('neighbor_agents_future', None),
             'cur_iter': cur_iter,
+            'pad_state': pad_gt,
         }
         input_ids = tokenizer([messages], return_tensors="pt", add_special_tokens=False).input_ids[0]
         input_ids = padding_token([input_ids], tokenizer.pad_token_id, padding_side='left').cuda()
