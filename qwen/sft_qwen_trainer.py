@@ -367,17 +367,9 @@ def main():
     }
     if model_args.ckpt_path:
         tokenizer = AutoTokenizer.from_pretrained(model_args.ckpt_path, **tokenizer_kwargs)
-        print('!!!!!!!! Loading tokenizer from {}'.format(model_args.ckpt_path))
+        logger.info(f'Loading tokenizer from {model_args.ckpt_path}')
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
-    # tokenizer.pad_token = tokenizer.eos_token
-    # 自动确保特殊 token 一致
-    # if tokenizer.bos_token is None:
-    #     tokenizer.bos_token = "<|im_start|>"
-    # if tokenizer.eos_token is None:
-    #     tokenizer.eos_token = "<|im_end|>"
-    # if tokenizer.pad_token is None:
-    #     tokenizer.pad_token = tokenizer.eos_token  # 常规共享
     tokenizer.pad_token_id = 0
     tokenizer.bos_token_id = 1
     tokenizer.eos_token_id = 2
@@ -412,13 +404,13 @@ def main():
         if not model_args.ckpt_path:
             tokenizer.add_special_tokens(special_tokens)
         else:
-            print('!!!!!!!!!! special tokens will not be added again, check if this is intended !!!!!!!!!!!!')
+            logger.info('Special tokens will not be added again, check if this is intended')
 
         # 保存映射
         special_token_ids = tokenizer.convert_tokens_to_ids(mapped_tokens)
         special_token_dict = dict(zip(user_tokens, special_token_ids))
         config.special_token_dict = special_token_dict
-        print("Special tokens mapping:", special_token_dict)
+        logger.info(f"Special tokens mapping: {special_token_dict}")
 
     
     ##############################
@@ -437,7 +429,6 @@ def main():
         task_type="CAUSAL_LM",
         layers_to_transform=model_args.layers_to_transform
     )
-    # print(lora_config)
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
@@ -450,9 +441,8 @@ def main():
         if model_args.torch_dtype in ["auto", None]
         else getattr(torch, model_args.torch_dtype)
     )
-    print(torch_dtype)
-    print('==================')
-    print(int(os.environ.get("LOCAL_RANK")))
+    logger.info(f"Using torch dtype: {torch_dtype}")
+    logger.info(f"LOCAL_RANK: {int(os.environ.get('LOCAL_RANK', 0))}")
     # torch_dtype = torch.float16
     model = Qwen3ForCausalLM.from_pretrained(
         model_args.model_name_or_path,
@@ -471,7 +461,7 @@ def main():
     # on a small vocab and want a smaller embedding size, remove this test.
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size and model_args.resize_token_embeddings:
-        print('resize_token_embeddings from {} to {}'.format(embedding_size, len(tokenizer)))
+        logger.info(f'Resizing token embeddings from {embedding_size} to {len(tokenizer)}')
         model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=2)
 
     
@@ -481,8 +471,8 @@ def main():
         try:
             model = prepare_model_for_kbit_training(model)
         except:
-            print('!!!!!!!!!! prepare_model_for_kbit_training failed, continue anyway !!!!!!!!!!!!')
-            import pdb; pdb.set_trace()
+            logger.error('prepare_model_for_kbit_training failed, continuing anyway')
+            pass
     
     column_names = list(raw_datasets["train"].features)
     input_column_name = 'input'

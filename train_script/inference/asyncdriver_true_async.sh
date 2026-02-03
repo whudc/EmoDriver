@@ -21,13 +21,13 @@ if [ "$LLM_INTERVAL" == "0" ] || [ "$LLM_INTERVAL" == "-1" ]; then
     SAVE_DIR_NAME="asyncdriver_event_driven"
 else
     echo "LLM Update Interval: ${LLM_INTERVAL}s (fixed interval mode)"
-    SAVE_DIR_NAME="asyncdriver_true_async_${LLM_INTERVAL}s"
+    SAVE_DIR_NAME="asyncdriver_true_async_${LLM_INTERVAL}s_2"
 fi
 echo "Save Directory: $SAVE_DIR_NAME"
 echo "========================================="
 
 CUDA_VISIBLE_DEVICES=$GPU_ID python train_script/inference/simulator_qwen4drive_async.py \
---planner qwen/output/llm_load_pretrain_lora_gameformer_qwen/checkpoint-16875 \
+--planner qwen/output/emodriver2/checkpoint-16875 \
 --base_model qwen/qwen/Qwen3-8B \
 --planner_type qwen4drive_async \
 --save_dir $SAVE_DIR_NAME \

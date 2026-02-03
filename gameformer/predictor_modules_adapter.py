@@ -151,7 +151,6 @@ class CrossTransformer(nn.Module):
         # b_q, _, _ = self.cross_attention.in_proj_bias.chunk(3)
         # projected_q = torch.matmul(query, W_q) + b_q
         if llm_feature is None:
-            import pdb; pdb.set_trace()
             return attention_output
         if (attention_output != self.llm_adapt_attention(query, llm_feature, attention_output)).any():
             print('!!!!!!!!!!!!!!!!adapter has been updated!!!!!!!!!!!!!!!!')

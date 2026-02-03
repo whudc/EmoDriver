@@ -13,7 +13,7 @@ GPU_ID=0
 TOTAL_SCENARIOS=14
 
 # 推理脚本路径
-INFER_SCRIPT="train_script/inference/asyncdriver_true_async.sh"
+INFER_SCRIPT="train_script/inference/asyncdriver_infer.sh"
 
 # 日志目录
 LOG_DIR="logs/infer"
@@ -23,7 +23,7 @@ echo "������ Start sequential inference on GPU $GPU_ID"
 echo "Total scenarios: $TOTAL_SCENARIOS"
 echo "---------------------------------------------"
 
-for ((i=0; i<TOTAL_SCENARIOS; i++)); do
+for ((i=10; i<TOTAL_SCENARIOS; i++)); do
     LOG_FILE="$LOG_DIR/scenario_${i}_gpu${GPU_ID}.log"
 
     echo "→ Running scenario_type_id=$i on GPU $GPU_ID"

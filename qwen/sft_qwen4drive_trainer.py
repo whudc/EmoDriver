@@ -340,7 +340,7 @@ def main():
     }
     if model_args.ckpt_path:
         tokenizer = AutoTokenizer.from_pretrained(model_args.ckpt_path, **tokenizer_kwargs)
-        print('!!!!!!!! Loading tokenizer from {}'.format(model_args.ckpt_path))
+        logger.info(f'Loading tokenizer from {model_args.ckpt_path}')
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
     # tokenizer.pad_token = tokenizer.eos_token
@@ -377,9 +377,7 @@ def main():
             task_type="CAUSAL_LM",
             layers_to_transform=model_args.layers_to_transform
         )
-        # print('\n\n================== Lora Cfg =================')
-        # print(lora_config)
-        # print('\n\n')
+
     else:
         lora_config = None
 
@@ -413,7 +411,7 @@ def main():
     # on a small vocab and want a smaller embedding size, remove this test.
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size and model_args.resize_token_embeddings:
-        print('resize_token_embeddings from {} to {}'.format(embedding_size, len(tokenizer)))
+        logger.info(f'Resizing token embeddings from {embedding_size} to {len(tokenizer)}')
         model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=2)
 
     if model_args.load_in_bits==8:
@@ -455,7 +453,7 @@ def main():
         elif 'right' in input_text:
             input_text = input_text.replace('right', 'left')
         if config.ins_wo_stop:
-            pattern = r'Nevigation instructions:.*?\n\n'
+            pattern = r'Navigation instructions:.*?\n\n'
             match = re.search(pattern, input_text)
             if match:
                 start_index = match.start()
@@ -476,8 +474,6 @@ def main():
                         continue
                     elif nav_inst=='':
                         continue
-                    else:
-                        import pdb; pdb.set_trace()
                     cmd_ls.append(cmd)
                     pattern = r'\d+\.\d+'
                     match = re.search(pattern, nav_inst)
@@ -485,8 +481,6 @@ def main():
                         dist = match.group(0)
                         dist = float(dist)
                         dist_ls.append(dist)
-                    else:
-                        import pdb; pdb.set_trace()
                 
                 if not len(cmd_ls)==0:
                     cur_c = None
@@ -503,15 +497,11 @@ def main():
                             cur_c = c
                             cur_d = d
                     instruction += (cur_c + str(np.round(cur_d, 2)) + ' meters. ')
-                    # if 'stop' in input_text:
-                    #     import pdb; pdb.set_trace()
                     input_text = pre_text + instruction + pro_text
                 else:
                     input_text = input_text
-            else:
-                import pdb; pdb.set_trace()
 
-        # print(input_text)
+
         input_text = input_text.replace('<map>','<map></map>')
         target_text = data_point[target_column_name]
         full_prompt = input_text + target_text
@@ -525,7 +515,6 @@ def main():
         else:
             map_info = np.load(map_info, allow_pickle=True)
             if 'ego_v_a' in [k for k in map_info.keys()]:
-                # print('!!!!!!!!!!! Using map info with dynamic features !!!!!!!!!!!')
                 input_dict = {
                     'ego_agent_past': map_info['ego_agent_past'], # history
                     'neighbor_agents_past': map_info['neighbor_agents_past'],
@@ -555,7 +544,6 @@ def main():
                     traffic_light_array[3] = 1
                 input_dict['traffic_light'] = traffic_light_array
             else:
-                # print('!!!!!!!!!!! Using map info without dynamic features !!!!!!!!!!!')
                 input_dict = {
                     'ego_agent_past': map_info['ego_agent_past'],
                     'neighbor_agents_past': map_info['neighbor_agents_past'],
@@ -594,7 +582,7 @@ def main():
             try:
                 from datasets import load_from_disk
                 tokenized_datasets = load_from_disk(model_args.dataset_cache)
-                print(f"!!!!!!!!!!  ----------------- Loading dataset from {model_args.dataset_cache}")
+                logger.info(f"Loading dataset from {model_args.dataset_cache}")
             except FileNotFoundError:
                 tokenized_datasets = raw_datasets.map(
                     generate_and_tokenize_prompt,

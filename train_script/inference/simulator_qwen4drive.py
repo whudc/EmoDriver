@@ -7,6 +7,8 @@ from nuplan.planning.script.run_simulation import main as main_simulation
 import hydra
 import warnings
 warnings.filterwarnings("ignore", "invalid value encountered in.*", RuntimeWarning)
+import matplotlib
+matplotlib.use("Agg")
 import os
 
 case_type = [

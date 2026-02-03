@@ -18,6 +18,7 @@ from gameformer.obs_adapter import *
 from gameformer.state_lattice_planner import LatticePlanner
 
 from qwen.planner.async_llm_manager import AsyncLLMManager
+from qwen.planner.qwen4drive_planner import ilqr_replan_if_collision
 
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.actor_state.state_representation import StateSE2
@@ -340,7 +341,6 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
             self._get_prediction(features, ins_path, cur_iter)
 
         if self.disable_refpath:
-            print('ref path is disabled !!!!!!!!!!!!')
             ref_path = None
 
         # GameFormer trajectory planning
@@ -424,7 +424,14 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
 
         # Main planning
         trajectory = self._plan(ego_state, history, traffic_light_data, observation, current_input.iteration)
-
+        # trajectory = ilqr_replan_if_collision(
+        #     ego_state=ego_state,
+        #     trajectory=trajectory,
+        #     observation=observation,
+        #     history=history,
+        #     future_horizon=self._future_horizon,
+        #     dt=0.1,
+        # )
         total_time = time.time() - s
         self._compute_trajectory_runtimes.append(total_time)
 

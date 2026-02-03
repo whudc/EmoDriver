@@ -30,6 +30,7 @@ from peft.utils import (
 )
 from transformers import logging
 
+
 logger = logging.get_logger(__name__)
 
 @dataclass
@@ -383,12 +384,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         logits_to_keep: Union[int, torch.Tensor] = 0,
     ) -> Union[Tuple, CausalLMOutputWithPastWithModel]:
 
-        # output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        # output_hidden_states = (
-        #     output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        # )
-        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         if map_feats is not None:
             map_feats = map_feats.to(self.map_adapter.weight.dtype)
             map_feats = self.map_adapter(map_feats)
@@ -404,9 +399,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             cache_position=cache_position,
-            # output_attentions=output_attentions,
-            # output_hidden_states=output_hidden_states,
-            # return_dict=return_dict,
         )
 
         hidden_states = outputs.last_hidden_state
@@ -750,29 +742,27 @@ class MapPeftModelForCausalLM(PeftModelForCausalLM):
         else:
             model = MODEL_TYPE_TO_PEFT_MODEL_MAPPING[config.task_type](model, config, adapter_name)
         model.load_adapter(model_id, adapter_name, is_trainable=is_trainable, **kwargs)
-        
-        # load map adapter with copy paramter
+
+        # Load map adapter with copy parameter
         try:
             loaded_weight = torch.load(os.path.join(model_id, 'map_adapter.bin'))
-        except:
-            print(' error in load map adapter')
+        except (FileNotFoundError, RuntimeError) as e:
+            logger.warning(f'Error loading map adapter: {e}')
             loaded_weight = {}
         for name, param in model.named_parameters():
             if name in loaded_weight.keys():
                 param.data.copy_(loaded_weight[name])
-                # param.requires_grad = is_trainable
-                print(f"Load map adapter weight {name} from {model_id}")
-        
-        # load embed_tokens with copy paramter
+                logger.info(f"Load map adapter weight {name} from {model_id}")
+
+        # Load embed_tokens with copy parameter
         try:
             loaded_weight = torch.load(os.path.join(model_id, 'embed_tokens.bin'))
-        except:
-            print(' error in load embed tokens')
+        except (FileNotFoundError, RuntimeError) as e:
+            logger.warning(f'Error loading embed tokens: {e}')
             loaded_weight = {}
         for name, param in model.named_parameters():
             if name in loaded_weight.keys():
                 param.data.copy_(loaded_weight[name])
-                # param.requires_grad = is_trainable
-                print(f"Load embed_tokens weight {name} from {model_id}")
+                logger.info(f"Load embed_tokens weight {name} from {model_id}")
         
         return model

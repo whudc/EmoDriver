@@ -6,8 +6,8 @@ import json
 # =========================
 # 配置
 # =========================
-# folder_path = "simulation_save_root_path/simulation/asyncdriver_self_2"
-folder_path = "simulation_save_root_path/simulation/asyncdriver_true_async_0.5s"
+folder_path = "simulation_save_root_path/simulation/asyncdriver_self"
+# folder_path = "simulation_save_root_path/simulation/asyncdriver_true_async_0.5s_2"
 
 
 metrics = [
@@ -34,7 +34,9 @@ for scenario_dir in root.iterdir():
 
     base_dir = (
         scenario_dir
-        / "qwen4drive_async_experiment_0.5s"
+        # / "qwen4drive_async_experiment_0.5s"
+        / "qwen4drive_experiment"
+        # / "qwen4drive_async_event_driven"
         / "closed_loop_reactive_agents"
     )
 

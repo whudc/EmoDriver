@@ -259,8 +259,7 @@ class Qwen2DriveModel:
                     #     if cmd != 'stop. ':
                     #         instruction += (str(np.round(dis-cur_dis, 2)) + ' meters. ')
                     cmd_ls.append(cur_cmd)
-                    # if 'go straight' in cur_cmd:
-                    #     import pdb; pdb.set_trace()
+
                     dis_ls.append(np.round(dis_cum[idx - 1] - cur_dis, 2))
                     # time_ls.append(idx*0.5)
                     if 'stop' not in cur_cmd and 'halt' not in cur_cmd:

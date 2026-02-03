@@ -165,10 +165,17 @@ class LatticePlanner:
             elif len(path_polyline) > 21:
                 sampled_index = [20]
             else:
-                print(len(path_polyline))
+                # print(len(path_polyline))
                 print("Error: path too short in lattice planner!")
-                sampled_index = [1]
-     
+                # sampled_index = [1]
+                available_len = len(path_polyline) - 1
+                if available_len >= 10:
+                    sampled_index = [available_len // 2, available_len]
+                elif available_len >= 5:
+                    sampled_index = [available_len]
+                else:
+                    logging.warning(f"Path extremely short: {available_len} points")
+                    sampled_index = [max(1, available_len - 1)]
             target_states = path_polyline[sampled_index].tolist()
             for j, state in enumerate(target_states):
                 first_stage_path = calc_4points_bezier_path(ego_state[0], ego_state[1], ego_state[2], 

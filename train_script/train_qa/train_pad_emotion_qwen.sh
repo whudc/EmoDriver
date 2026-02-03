@@ -1,0 +1,56 @@
+#!/bin/bash
+# Stage 3.5: PAD Emotion State Training
+# 训练模型理解PAD情感状态对驾驶决策的影响
+
+root_dir=./qwen
+task_name=pad_emotion_decision
+MASTER_PORT=29543
+
+deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen_trainer.py \
+--model_name_or_path qwen/qwen/Qwen3-8B \
+--train_files data/pad_emotion_decision_train.json \
+--validation_files data/pad_emotion_decision_val.json \
+--ckpt_path qwen/output/mix_driveqa_decision/ \
+--per_device_train_batch_size 2 \
+--per_device_eval_batch_size 1 \
+--do_train \
+--do_eval \
+--use_fast_tokenizer False \
+--output_dir ${root_dir}/output/${task_name} \
+--eval_strategy steps \
+--learning_rate 5e-5 \
+--gradient_accumulation_steps 10 \
+--freeze_map_adapter True \
+--num_train_epochs 1 \
+--warmup_steps 10 \
+--load_in_bits 4 \
+--lora_r 8 \
+--lora_alpha 32 \
+--target_modules q_proj,k_proj,v_proj,o_proj,down_proj,gate_proj,up_proj \
+--logging_dir ${root_dir}/tensorboard/${task_name} \
+--logging_steps 10 \
+--logging_strategy steps \
+--save_strategy steps \
+--preprocessing_num_workers 10 \
+--save_total_limit 1 \
+--save_steps 10000 \
+--eval_steps 10000 \
+--seed 7 \
+--disable_tqdm False \
+--ddp_find_unused_parameters False \
+--block_size 3072 \
+--report_to tensorboard \
+--overwrite_output_dir \
+--resize_token_embeddings True \
+--map_input_size 256 \
+--deepspeed ${root_dir}/ds_config.json \
+--bf16 \
+--bf16_full_eval \
+--ddp_timeout 18000000 \
+--add_special_tokens "<map>,</map>" \
+# --gradient_checkpointing
+
+# 使用方法:
+# bash train_script/train_qa/train_pad_emotion_qwen.sh 0,1,2,3
+# 其中 0,1,2,3 是要使用的GPU编号
+s

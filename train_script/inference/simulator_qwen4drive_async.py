@@ -22,7 +22,8 @@ from nuplan.planning.script.run_simulation import main as main_simulation
 import hydra
 import warnings
 warnings.filterwarnings("ignore", "invalid value encountered in.*", RuntimeWarning)
-
+import matplotlib
+matplotlib.use("Agg")
 case_type = [
     'starting_left_turn',
     'starting_right_turn',

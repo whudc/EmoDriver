@@ -933,9 +933,6 @@ class CustomTrainer(Trainer):
         if is_sagemaker_mp_enabled():
             self.optimizer = smp.DistributedOptimizer(self.optimizer)
 
-        # for param_group in self.optimizer.param_groups:
-        #     print(param_group['lr'])
-        # import pdb; pdb.set_trace()
         return self.optimizer
 
     def _save_checkpoint(self, model, trial, metrics=None):

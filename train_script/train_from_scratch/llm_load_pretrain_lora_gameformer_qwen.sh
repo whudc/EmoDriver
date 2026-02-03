@@ -1,6 +1,6 @@
 
 root_dir=./qwen
-task_name=$(basename "$0" .sh)
+task_name=emodriver2
 PYTHONPATH=.
 MASTER_PORT=29520
 
@@ -46,10 +46,4 @@ deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen4drive
 --ddp_timeout 18000000 \
 --gameformer_ckpt training_log/qwen/model_epoch_46_valADE_1.1090.pth \
 --lora_ckpt qwen/output/mix_driveqa_decision/adapter_model.safetensors \
-# # debug
-# --max_train_samples 200 \
-# --max_eval_samples 50
 
-# 2>&1 | tee -a ${root_dir}/log/train_${task_name}.log > /dev/null &
-# --layers_to_transform 39 \
-# 2>&1 | tee -a ${root_dir}/log/train_${task_name}.log > /dev/null &

@@ -1,8 +1,10 @@
 data/
 dataset_cache/
 logs/
+map_v2/
 qwen/qwen/
 qwen/output/
+qwen/output_old/
 qwen/tensorboard/
 
 simulation_save_root_path/

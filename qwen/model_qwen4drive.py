@@ -1,6 +1,8 @@
-import math, os
+import math
+import os
 from collections import OrderedDict
-from typing import Any, List, Optional, Tuple, Union, List
+from typing import Any, List, Optional, Tuple, Union
+
 
 import torch
 import torch.distributions as dist
@@ -284,7 +286,7 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
                              'acc_classification',
                              'lane_change',
                              'traffic_light',
-                             'feature_adpter']
+                             'feature_adapter']
 
     _keep_small_lr_modules = [
             'gameformer',
@@ -344,7 +346,7 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         else:
             self.gameformer =  LLMEnhancedGameFormer(encoder_layers=3, decoder_levels=2, modalities=6, neighbors=10)
         self.map_encoder = GameformerEncoder(layers=3)
-        self.feature_adpter = nn.Linear(self.model.config.hidden_size, 256)
+        self.feature_adapter = nn.Linear(self.model.config.hidden_size, 256)
             
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
@@ -368,18 +370,14 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
     def reinit_weights(self):
         init_module_list = [name for name in self.adapter_name_list if hasattr(self, name)]
         for name in init_module_list:
-            print(f"Reinit {name} weights")
+            logger.info(f"Reinitializing {name} weights")
             for module in getattr(self, name).modules():
-                # if isinstance(module, nn.LSTM):
-                #     import pdb; pdb.set_trace()
                 if hasattr(module, '_reset_parameters'):
                     module._reset_parameters()
                 elif hasattr(module, 'reset_parameters'):
                     module.reset_parameters()
                 elif hasattr(module, 'flatten_parameters'):
                     module.flatten_parameters()
-                # else:
-                #     print(f"Module {module} has no reset_parameters or _reset_parameters method")
         
     def resume_from_checkpoint(self ,ckpt_dir, gameformer_ckpt=False):
         if gameformer_ckpt:
@@ -395,10 +393,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             if len(processed_weights) == 0:
                 processed_weights = weights
             self.map_encoder.load_state_dict(processed_weights, strict=False)
-        # elif lora_ckpt:
-        #     weights = torch.load(ckpt_dir)
-        #     set_peft_model_state_dict(self, weights)
-        #     print('LoRA pretrain weights have been loaded')
         else:
             if os.path.isdir(ckpt_dir):
                 ckpt_ls = os.listdir(ckpt_dir)
@@ -409,13 +403,14 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
                         if ckpt == 'embed_tokens.bin':
                             self.load_state_dict(weights, strict=False)
                         elif module is None:
-                            print("%s could not be loaded successfully"%str(ckpt))
+                            logger.warning(f"{ckpt} could not be loaded successfully")
                         else:
                             try:
                                 module.load_state_dict(weights, strict=True)
                                 module.to(self.model.device)
-                            except:
-                                print("%s could not be loaded successfully"%str(ckpt))
+                            except Exception as e:
+                                logger.error(f"Failed to load {ckpt}: {e}")
+                                continue
             else:
                 weights = torch.load(ckpt_dir)
                 self.gameformer.load_state_dict(weights, strict=True)
@@ -485,14 +480,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         output_hidden_states=None,
         return_dict=None,
     ) -> Union[Tuple, CausalLMOutputWithPastWithModel]:
-
-        # output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        # output_hidden_states = (
-        #     output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        # )
-        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        # gt for gameformer
-        # import ipdb; ipdb.set_trace()
         if not inference:
             ego_future_gt = ego_future
             neighbors_future_gt = neighbors_future
@@ -512,13 +499,11 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             }
             encoder_outputs = self.map_encoder(raw_map_vector)
             map_feats, map_masks = encoder_outputs['encoding'], encoder_outputs['mask']
-            if torch.isnan(map_feats).any():
-                import pdb; pdb.set_trace()
+
             map_feats = self.map_adapter(map_feats)
             map_feats = map_feats.to(self.map_adapter.weight.dtype)
         else:
             raise NotImplementedError()
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         
         outputs, labels, new_inputs_attention_mask, feature_position = self.model(
             input_ids=input_ids,
@@ -531,9 +516,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             cache_position=cache_position,
-            # output_attentions=output_attentions,
-            # output_hidden_states=output_hidden_states,
-            # return_dict=return_dict,
         )
         ego_plan = None
         level_k_outputs = None
@@ -554,10 +536,10 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         if self.use_all_tokens:
             pooling_features = hidden_states.mean(dim=1)
             hidden_states = pooling_features
-            predicted_feature = self.feature_adpter(pooling_features)
+            predicted_feature = self.feature_adapter(pooling_features)
         else:
             hidden_states = hidden_states[:, -1, :]
-            predicted_feature = self.feature_adpter(hidden_states)
+            predicted_feature = self.feature_adapter(hidden_states)
             
         # loss for llm hidden feature
         predicted_waypoints = self.waypoints_predictor(hidden_states)
@@ -574,22 +556,22 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         predicted_neighbour_lane = self.neighbour_lane(hidden_states)
         predicted_neighbour_lane = predicted_neighbour_lane.reshape(predicted_neighbour_lane.shape[0], 2)
         if not inference:
-            neighbour_lane_loss = F.binary_cross_entropy(predicted_neighbour_lane, torch.tensor(neighbour_lane.squeeze(-1), dtype=torch.float32))
+            neighbour_lane_loss = F.binary_cross_entropy(predicted_neighbour_lane, neighbour_lane.squeeze(-1))
         
         pred_acc_classification = self.acc_classification(hidden_states)
         pred_acc_classification = pred_acc_classification.reshape(pred_acc_classification.shape[0], 3)
         if not inference:
-            acc_class_loss = F.cross_entropy(pred_acc_classification, torch.tensor(acc_classification, dtype=torch.float32))
+            acc_class_loss = F.cross_entropy(pred_acc_classification, acc_classification)
         
         pred_lane_change = self.lane_change(hidden_states)
         pred_lane_change = pred_lane_change.reshape(pred_lane_change.shape[0], 1)
         if not inference:
-            lane_change_loss = F.binary_cross_entropy(pred_lane_change, torch.tensor(lane_change, dtype=torch.float32))
+            lane_change_loss = F.binary_cross_entropy(pred_lane_change, lane_change)
         
         pred_traffic_light = self.traffic_light(hidden_states)
         pred_traffic_light = pred_traffic_light.reshape(pred_traffic_light.shape[0], 4)
         if not inference:
-            traffic_light_loss = F.cross_entropy(pred_traffic_light, torch.tensor(traffic_light, dtype=torch.float32))
+            traffic_light_loss = F.cross_entropy(pred_traffic_light, traffic_light)
         
         if not inference:
             llm_multi_head_loss = v_a_loss + neighbour_lane_loss + acc_class_loss + lane_change_loss + traffic_light_loss
@@ -621,19 +603,8 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             plan_loss = planning_loss(ego_plan, ego_future_gt[..., :2])
             gameformer_loss = gmm_loss + plan_loss
             loss = gameformer_loss + llm_loss
-        # print("hidden_states.shape =", hidden_states.shape)
 
-        # slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        # logits = self.lm_head(hidden_states[:, slice_indices, :])
         logits = self.lm_head(hidden_states)
-
-        # loss = None
-        # if labels is not None:
-        #     loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size)
-
-        # if not return_dict:
-        #     output = (logits,) + outputs[1:]
-        #     return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPastWithModel(
             loss=loss if not inference else None,
@@ -694,7 +665,7 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
                     )
                 else:
                     torch.save(module.state_dict(), os.path.join(save_directory, f'{name}.bin'))
-                print(f"Save {name}")
+                logger.info(f"Saved {name}")
 
         # save global dict
         embed_tokens_name = None
@@ -721,47 +692,43 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
 
     def load_weights(self, model_id):
         if model_id is None:
-            print('!!!!  No model id, not loaded at all')
+            logger.warning('No model id provided, not loading any weights')
             return
         if self.config.mapEncoder_pretrain_weight is None:
             self.config.mapEncoder_pretrain_weight = os.path.join(model_id, f'map_encoder.bin')
         self.reload_mapencoder_weights()
         for map_encoder_name in self.adapter_name_list:
-            # if 'gameformer' in map_encoder_name:
-            #     import pdb; pdb.set_trace()
             try:
                 loaded_weight = torch.load(os.path.join(model_id, f'{map_encoder_name}.bin'))
                 new_weight = OrderedDict()
                 for k in loaded_weight:
                     new_weight[f'{map_encoder_name}.{k}'] = loaded_weight[k]
                 loaded_weight = new_weight
-            except:
-                print(f'Error in load {map_encoder_name}')
+            except (FileNotFoundError, RuntimeError) as e:
+                logger.warning(f'Error loading {map_encoder_name}: {e}')
                 continue
-            # print(f'Success in load {map_encoder_name}')
 
             for name, param in self.named_parameters():
                 if name in loaded_weight.keys():
-                    # if 'motion' in name:
-                    #     import pdb; pdb.set_trace()
                     param.data.copy_(loaded_weight[name])
                     del loaded_weight[name]
-                    print(f"Load {map_encoder_name} weight {name} from {model_id}")
-            
-            if len(loaded_weight.keys())!=0:
+                    logger.info(f"Load {map_encoder_name} weight {name} from {model_id}")
+
+            if len(loaded_weight.keys()) != 0:
                 for k in loaded_weight.keys():
-                    print('%s has not been successfully loaded!!!!!!!!!!!!!'%str(k))
+                    logger.warning(f'{k} has not been successfully loaded')
 
         try:
             loaded_weight = torch.load(os.path.join(model_id, 'embed_tokens.bin'))
-        except:
-            print(' error in load embed tokens')
+        except (FileNotFoundError, RuntimeError) as e:
+            logger.warning(f'Error loading embed tokens: {e}')
             loaded_weight = {}
         for name, param in self.named_parameters():
             if name in loaded_weight.keys():
                 param.data.copy_(loaded_weight[name])
-                # param.requires_grad = is_trainable
-                print(f"Load embed_tokens weight {name} from {model_id}")
+                logger.info(f"Load embed_tokens weight {name} from {model_id}")
+            
+
                 
 
     def prepare_inputs_for_generation(
@@ -878,20 +845,20 @@ class ModelWithLoRA(PeftModelForCausalLM):
         return outputs
     
     def resume_lora_from_checkpoint(self, ckpt_path):
-        weights = load_file(ckpt_path) 
+        weights = load_file(ckpt_path)
         set_peft_model_state_dict(self, weights)
-        print('LoRA pretrain weights have been loaded')
+        logger.info('LoRA pretrain weights have been loaded')
 
 
     def load_weights(self, model_id):
         if model_id is None:
-            print('!!!!  No model id, not loaded at all')
+            logger.warning('No model id provided, not loading any weights')
             return
         lora_ckpt = os.path.join(model_id, "adapter_model.safetensors")
         # lora_weights = torch.load(lora_ckpt)
         lora_weights = load_file(lora_ckpt)
         set_peft_model_state_dict(self, lora_weights)
-        print('LoRA weights have been loaded')
+        logger.info('LoRA weights have been loaded')
 
         global_ckpt_ = [dir_path for dir_path in os.listdir(model_id) if 'global' in dir_path][0]
         global_ckpt_ = os.path.join(model_id, global_ckpt_)
@@ -902,12 +869,10 @@ class ModelWithLoRA(PeftModelForCausalLM):
                 if name in model_weights.keys():
                     param.data.copy_(model_weights[name])
                     del model_weights[name]
-                    print(f"Load {name} weight from {model_ckpt_}")
+                    logger.info(f"Loaded {name} weight from {model_ckpt_}")
 
         if len(model_weights.keys())!=0:
                 for k in model_weights.keys():
-                    print('%s has not been successfully loaded!!!!!!!!!!!!!'%str(k))
+                    logger.warning(f'{k} has not been successfully loaded')
         self.to(self.model.device)
-
-
         
