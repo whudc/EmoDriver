@@ -1,4 +1,4 @@
-#   bash train_script/inference/asyncdriver_true_async.sh 0 0 1.5 1
+#   bash train_script/inference/asyncdriver_true_async.sh 0 0 1.5
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
@@ -11,7 +11,7 @@ echo "PYTHONPATH: $PYTHONPATH"
 GPU_ID=$1
 SCENARIO_TYPE=$2
 LLM_INTERVAL=${3:-0}  # Default 0 (event-driven mode) if not specified
-ENABLE_ILQR=${4:-1}   # 1: enable iLQR, 0: disable iLQR
+
 echo "========================================="
 echo "True Async AsyncDriver Inference"
 echo "GPU: $GPU_ID"
@@ -21,7 +21,7 @@ if [ "$LLM_INTERVAL" == "0" ] || [ "$LLM_INTERVAL" == "-1" ]; then
     SAVE_DIR_NAME="asyncdriver_event_driven"
 else
     echo "LLM Update Interval: ${LLM_INTERVAL}s (fixed interval mode)"
-    SAVE_DIR_NAME="asyncdriver_true_async_${LLM_INTERVAL}s_pad_inject"
+    SAVE_DIR_NAME="asyncdriver_true_async_${LLM_INTERVAL}s_test_ilqr"
 fi
 echo "Save Directory: $SAVE_DIR_NAME"
 echo "========================================="
@@ -36,6 +36,5 @@ CUDA_VISIBLE_DEVICES=$GPU_ID python train_script/inference/simulator_qwen4drive_
 --lora_r 8 \
 --type $SCENARIO_TYPE \
 --llm_interval $LLM_INTERVAL \
---enable_ilqr $ENABLE_ILQR \
 --async_mode \
 --simulation_root_path simulation_save_root_path \

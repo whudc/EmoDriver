@@ -7,13 +7,13 @@
 # ==================================================
 
 # 固定使用的 GPU
-GPU_ID=1
+GPU_ID=0
 
 # scenario 总数
 TOTAL_SCENARIOS=14
 
 # 推理脚本路径
-INFER_SCRIPT="train_script/inference/asyncdriver_infer.sh"
+INFER_SCRIPT="train_script/inference/asyncdriver_true_async.sh"
 
 # 日志目录
 LOG_DIR="logs/infer"
@@ -31,7 +31,7 @@ for ((i=0; i<TOTAL_SCENARIOS; i++)); do
 
     # 严格顺序执行（不使用 &）
     CUDA_VISIBLE_DEVICES=$GPU_ID \
-    bash $INFER_SCRIPT $GPU_ID $i 0.5 > "$LOG_FILE" 2>&1
+    bash $INFER_SCRIPT $GPU_ID $i 0.5 1> "$LOG_FILE" 2>&1
 
     # 失败即退出（非常重要）
     if [ $? -ne 0 ]; then

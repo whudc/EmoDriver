@@ -25,7 +25,7 @@ from peft import (  # noqa: E402
 from qwen.model_qwen4drive import Qwen3ForCausalLM, ModelWithLoRA
 import torch
 import numpy as np
-
+from gen_data import infer_pad, pad_to_text
 
 DEBUG = False
 RESET = "\033[0m"
@@ -62,12 +62,12 @@ def get_model(model_name_or_path=None,
     config.use_all_tokens = kwargs.get('use_all_tokens', False)
     config.map_insize = kwargs.get('map_insize', 256)
 
-    config.use_all_tokens = kwargs.get('use_all_tokens', False)
     config.adapter_fusion = kwargs.get('adapter_fusion', False)
 
     config.llm_inf_step = kwargs.get('llm_inf_step', 1)
     config.lora_r = kwargs.get('lora_r', 16)
-
+    config.use_emotion_injection = kwargs.get('use_emotion_injection', True)
+    config.emotion_injection_scale = kwargs.get('emotion_injection_scale', 1.0)
     if add_special_tokens is not None:
         additional_special_tokens = add_special_tokens.split(',')
         special_token_ids = tokenizer.convert_tokens_to_ids(additional_special_tokens)
@@ -170,7 +170,7 @@ class Qwen2DriveModel:
         cls.model_loaded = True
         cls.diversity = config.get('diversity_ins', False)
 
-    def generate_prompt(self, lane, return_navi=False):
+    def generate_prompt(self, lane, data, return_navi=False):
         if isinstance(lane, torch.Tensor):
             lane = lane.cpu().numpy()
         if self.ins_mode == 'None':
@@ -202,13 +202,31 @@ class Qwen2DriveModel:
                 cmd = np.array([1, 0, 0, 0])
             logging.info(cmd)
         logging.info(instruction)
+        ego_v_a = data.get("ego_v_a", None)
+        ego_past = data.get("ego_agent_past", None)
+        neighbor_past = data.get("neighbor_agents_past", None)
+        traffic_light = data.get("traffic_light", None)
+        lane_change = data.get("lane_change", None)
+        
+        P, A, D = infer_pad(
+            instruction=instruction,
+            ego_v_a=ego_v_a,
+            ego_past=ego_past,
+            neighbor_past=neighbor_past,     
+            traffic_light=traffic_light,
+            lane_change=lane_change,
+        )
+        emotion_text = pad_to_text(P, A, D)
         messages = f"""
-    Role: You are now an autonomous driving driver, and I will provide you with the environment information including Ego Car Information, Agents Information and Map Information.\n\nEnvironment: <map>\n\nNevigation instructions: {instruction}. \n\nPlease predict the future waypoints of the ego car based on the given environmental information and nevigation instrucions.\n\nFinal Answer:\n
+    Role: You are now an autonomous driving driver with emotion-aware capability, and I will provide you with the environment information including Ego Car Information, Agents Information, Map Information and the current driver emotion state.\n\nEnvironment: <map>\n\nNavigation instructions: {instruction}. \n\nEmotion State:\n- Pleasure (P): {P}\n- Arousal  (A): {A}\n- Dominance(D): {D}\n- Interpretation: {emotion_text}.\n\nPlease predict the future waypoints of the ego car based on the given environmental information, driver emotion state and navigation instrucions.\n\nFinal Answer:\n
     """
-        if return_navi:
-            return messages, cmd
-        return messages
+        pad_gt = [P, A, D]
+        pad_gt = torch.tensor([P, A, D], dtype=torch.float32)
 
+        if return_navi:
+            return messages, cmd, pad_gt
+        return messages, pad_gt
+       
     def get_instruction(self, ego_future_poses, threshold=0.5, return_prompt=True, limit=99999999, diversity=False):
         # dis_norm = np.linalg.norm(np.diff(np.concatenate([ego_future_poses[:1,:-1], ego_future_poses[:,:-1]], axis=0), n=1, axis=0), axis=1)
         ego_future_poses = ego_future_poses[:, :3]
@@ -286,7 +304,7 @@ class Qwen2DriveModel:
         if not hasattr(self, 'model_loaded') or not self.model_loaded:
             raise RuntimeError("Model not loaded properly.")
         tokenizer = self.tokenizer
-        messages = self.generate_prompt(ref_path)
+        messages, pad_gt = self.generate_prompt(ref_path, data)
         messages = messages.replace('<map>', '<map></map>')
         map_info = data
         input_dict = {
@@ -298,6 +316,7 @@ class Qwen2DriveModel:
             'ego_future': map_info.get('ego_agent_future', None),
             'neighbors_future': map_info.get('neighbor_agents_future', None),
             'cur_iter': cur_iter,
+            'pad_state': pad_gt,
         }
         input_ids = tokenizer([messages], return_tensors="pt", add_special_tokens=False).input_ids[0]
         input_ids = padding_token([input_ids], tokenizer.pad_token_id, padding_side='left').cuda()

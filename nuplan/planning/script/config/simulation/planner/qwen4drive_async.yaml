@@ -10,6 +10,7 @@ qwen4drive_async:
   gameformer_device: 'cuda:0'  # Device for GameFormer (can use different GPU)
 
   # Original parameters
+  enable_ilqr: True
   disable_refpath: False
   llm_plan: False
   ins_wo_stop: True

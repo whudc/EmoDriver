@@ -66,6 +66,8 @@ class ModelArguments:
     lora_ckpt: Optional[str] = field(default=None)
     ins_wo_stop: Optional[bool] = field(default=False)
     llm_inf_step: Optional[int] = field(default=1)
+    use_emotion_injection: Optional[bool] = field(default=True)
+    emotion_injection_scale: Optional[float] = field(default=1.0)
     model_name_or_path: Optional[str] = field(
         default=None,
         metadata={
@@ -248,6 +250,24 @@ class DataTrainingArguments:
                 extension = self.validation_files[0].split(".")[-1]
                 assert extension in ["csv", "json", "txt"], "`validation_file` should be a csv, a json or a txt file."
 
+_FLOAT_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+
+def extract_pad_from_text(text: str, default=(0.0, 0.0, 0.0), strict: bool = False):
+    pat = (
+        rf"Pleasure\s*(?:\([^)]*\))?\s*[:=]\s*({_FLOAT_RE}).*?"
+        rf"Arousal\s*(?:\([^)]*\))?\s*[:=]\s*({_FLOAT_RE}).*?"
+        rf"Dominance\s*(?:\([^)]*\))?\s*[:=]\s*({_FLOAT_RE})"
+    )
+
+    m = re.search(pat, text, flags=re.S | re.I)
+    if m:
+        return np.array(list(map(float, m.groups())), dtype=np.float32)
+
+    if strict:
+        raise ValueError(f"PAD not found in input text (head): {text[:300]!r}")
+
+    return np.array(default, dtype=np.float32)
+
 
 
 def main():
@@ -330,7 +350,9 @@ def main():
     config.lora_ckpt = model_args.lora_ckpt
     config.ins_wo_stop = model_args.ins_wo_stop
     config.llm_inf_step = model_args.llm_inf_step
-
+    config.use_emotion_injection = model_args.use_emotion_injection
+    config.emotion_injection_scale = model_args.emotion_injection_scale
+    
     tokenizer_kwargs = {
         "cache_dir": model_args.cache_dir,
         "use_fast": model_args.use_fast_tokenizer,
@@ -574,6 +596,9 @@ def main():
         tokenized_full_prompt["labels"] = [-100] * input_text_len + tokenized_full_prompt["labels"][input_text_len:]
         if map_info is not None:
             tokenized_full_prompt.update(input_dict)
+        pad_state = extract_pad_from_text(input_text)
+        pad_state = torch.from_numpy(pad_state)
+        tokenized_full_prompt["pad_state"] = pad_state
 
         return tokenized_full_prompt
 

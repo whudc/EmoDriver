@@ -1,26 +1,26 @@
 
 root_dir=./qwen
-task_name=emodriver3
+task_name=emoplanner
 PYTHONPATH=.
 MASTER_PORT=29520
 
 deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen4drive_trainer.py \
 --model_name_or_path qwen/qwen/Qwen3-8B \
---train_files  data/stage1_train_180k_processed_fixed.json \
---validation_files data/stage1_val_20k_processed_fixed.json \
+--train_files  data/stage1_train_180k_with_emotion.json \
+--validation_files data/stage1_val_20k_with_emotion.json \
 --feature_len 80 \
 --use_all_tokens False \
 --adapter_fusion True \
 --enable_lora True \
 --ins_wo_stop True \
 --lora_r 8 \
---per_device_train_batch_size 8 \
+--per_device_train_batch_size 4 \
 --per_device_eval_batch_size 1 \
 --do_train \
 --use_fast_tokenizer False \
 --output_dir ${root_dir}/output/${task_name} \
 --eval_strategy steps \
---learning_rate 1e-4 \
+--learning_rate 5e-5 \
 --gradient_accumulation_steps 1 \
 --num_train_epochs 3 \
 --warmup_steps 150 \
@@ -33,7 +33,7 @@ deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen4drive
 --save_total_limit 10 \
 --save_steps 100 \
 --eval_steps 100000000000 \
---seed 42 \
+--seed 7 \
 --disable_tqdm False \
 --ddp_find_unused_parameters False \
 --block_size 2048 \
@@ -45,5 +45,5 @@ deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen4drive
 --deepspeed ${root_dir}/ds_config.json \
 --ddp_timeout 18000000 \
 --gameformer_ckpt training_log/qwen/model_epoch_46_valADE_1.1090.pth \
---lora_ckpt qwen/output/mix_driveqa_decision/adapter_model.safetensors \
+--lora_ckpt qwen/output/mix_driveqa_decision_pad/adapter_model.safetensors \
 

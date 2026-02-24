@@ -206,6 +206,8 @@ class Qwen4DrivePlanner(BaseGFPlanner):
                  near_multiple_vehicles=False,
                  short_ins=-1,
                  llm_inf_step=1,
+                 use_emotion_injection=True,
+                 emotion_injection_scale=1.0,
                  model_cfg=None,
                  model_urban: TorchModuleWrapper = None):
         super().__init__(disable_refpath=disable_refpath)
@@ -228,6 +230,8 @@ class Qwen4DrivePlanner(BaseGFPlanner):
         model_cfg['finetune_model_path'] = finetune_model_path
         model_cfg['llm_inf_step'] = llm_inf_step
         model_cfg['lora_r'] = lora_r
+        model_cfg['use_emotion_injection'] = use_emotion_injection
+        model_cfg['emotion_injection_scale'] = emotion_injection_scale
         model_cfg['near_multiple_vehicles'] = near_multiple_vehicles
         model_cfg['model_name_or_path'] = model_name_or_path
         self._model_cfg = model_cfg
@@ -509,45 +513,6 @@ class Qwen4DrivePlanner(BaseGFPlanner):
         logging.error(f'Iteration {iteration}: {time.time() - s:.3f} s') 
         return trajectory
 
-def _extract_reference_and_future_from_traj(trajectory):
-    """从 InterpolatedTrajectory 中提取 iLQR reference_trajectory 和 ego_future(用于粗略距离评估)"""
-    ref_states = []
-    ego_future = []
-
-    for state in trajectory._trajectory[1:]:
-        sx, sy, sheading = state.center
-        svx = state.dynamic_car_state.center_velocity_2d.x
-        svy = state.dynamic_car_state.center_velocity_2d.y
-        v = math.hypot(svx, svy)
-        ref_states.append((sx, sy, sheading, v, state.tire_steering_angle))
-        ego_future.append((sx, sy, np.cos(sheading), np.sin(sheading)))
-
-    if not ref_states:
-        return None, None
-
-    return np.asarray(ref_states, dtype=float), np.asarray(ego_future, dtype=float)
-
-
-def _compute_min_center_distance(ego_future_xy, obs_positions):
-    """用中心点距离做一个稳定的风险量：min distance over horizon"""
-    if ego_future_xy.size == 0 or not obs_positions:
-        return float("inf")
-    ox = np.array([p[0] for p in obs_positions], dtype=float)[None, :]   # (1, M)
-    oy = np.array([p[1] for p in obs_positions], dtype=float)[None, :]   # (1, M)
-    ex = ego_future_xy[:, 0:1]  # (T, 1)
-    ey = ego_future_xy[:, 1:2]  # (T, 1)
-    d = np.sqrt((ex - ox) ** 2 + (ey - oy) ** 2)  # (T, M)
-    return float(d.min())
-
-
-def _traj_xy_heading(trajectory):
-    """提取轨迹 (x,y,heading) 数组，用于偏移评估"""
-    pts = []
-    for s in trajectory._trajectory:
-        x, y, h = s.center
-        pts.append((x, y, h))
-    return np.asarray(pts, dtype=float)
-
 
 def ilqr_replan_if_collision(
     ego_state,
@@ -557,10 +522,12 @@ def ilqr_replan_if_collision(
     future_horizon: float,
     dt: float = 0.1,
 ):
-    """
-    当检测到潜在碰撞时，使用 iLQR 对轨迹进行后处理优化；否则直接返回原轨迹
-    """
-    warm_start_params = ILQRWarmStartParameters(
+    """Replan with iLQR when collision is detected; fallback to original trajectory if quality checks fail."""
+    try:
+        if trajectory is None or len(trajectory._trajectory) < 2:
+            return trajectory
+
+        warm_start_params = ILQRWarmStartParameters(
             k_velocity_error_feedback=0.5,
             k_steering_angle_error_feedback=0.05,
             lookahead_distance_lateral_error=15.0,
@@ -568,264 +535,145 @@ def ilqr_replan_if_collision(
             jerk_penalty_warm_start_fit=1e-4,
             curvature_rate_penalty_warm_start_fit=1e-2,
         )
-    # ================== 当前自车状态 ==================
-    x, y, heading = ego_state.center
-    vx = ego_state.dynamic_car_state.center_velocity_2d.x
-    vy = ego_state.dynamic_car_state.center_velocity_2d.y
-    ax = ego_state.dynamic_car_state.center_acceleration_2d.x
-    ay = ego_state.dynamic_car_state.center_acceleration_2d.y
 
-    ego_current = np.array(
-        [(x, y, np.cos(heading), np.sin(heading), vx, vy, ax, ay)],
-        dtype=float,
-    )
+        # Current ego state for collision detector (center frame).
+        x, y, heading = ego_state.center
+        vx = ego_state.dynamic_car_state.center_velocity_2d.x
+        vy = ego_state.dynamic_car_state.center_velocity_2d.y
+        ax = ego_state.dynamic_car_state.center_acceleration_2d.x
+        ay = ego_state.dynamic_car_state.center_acceleration_2d.y
+        ego_current = np.array([(x, y, np.cos(heading), np.sin(heading), vx, vy, ax, ay)], dtype=float)
 
-    # ================== 构造参考轨迹 & 未来 ego 姿态 ==================
-    reference_trajectory, ego_future = _extract_reference_and_future_from_traj(trajectory)
-    if reference_trajectory is None:
-        return trajectory
+        # Build center-based future for detector and rear-axle-based reference for iLQR.
+        ego_future = []
+        reference_trajectory = []
+        for state in trajectory._trajectory[1:]:
+            cx, cy, ch = state.center
+            ego_future.append((cx, cy, np.cos(ch), np.sin(ch)))
 
-    # ================== 提取周围障碍物 ==================
-    static_objects = observation.tracked_objects.get_static_objects()
-    neighbor_agents = observation.tracked_objects.get_agents()
+            rx, ry, rh = state.rear_axle
+            rvx = state.dynamic_car_state.rear_axle_velocity_2d.x
+            rvy = state.dynamic_car_state.rear_axle_velocity_2d.y
+            rv = math.hypot(rvx, rvy)
+            reference_trajectory.append((rx, ry, rh, rv, state.tire_steering_angle))
 
-    filtered_neighbor_agents = []
-    # 提取所有动态障碍物信息，稍后不仅用于检测，也用于iLQR约束
-    neighbor_list_for_solver = [] 
-    
-    for neighbor in neighbor_agents:
-        nx, ny, nheading = neighbor.center
-        nvx = neighbor.velocity.x
-        nvy = neighbor.velocity.y
-        length = neighbor.box.length
-        width = neighbor.box.width
+        if not reference_trajectory:
+            return trajectory
 
-        # 构建碰撞检测用的 array
-        filtered_neighbor_agents.append(
-            (nx, ny, np.cos(nheading), np.sin(nheading), nvx, nvy, length, width)
+        ego_future = np.asarray(ego_future, dtype=float)
+        reference_trajectory = np.asarray(reference_trajectory, dtype=float)
+
+        static_objects = observation.tracked_objects.get_static_objects()
+        neighbor_agents = observation.tracked_objects.get_agents()
+
+        filtered_neighbor_agents = []
+        for neighbor in neighbor_agents:
+            nx, ny, nheading = neighbor.center
+            filtered_neighbor_agents.append(
+                (
+                    nx,
+                    ny,
+                    np.cos(nheading),
+                    np.sin(nheading),
+                    neighbor.velocity.x,
+                    neighbor.velocity.y,
+                    neighbor.box.length,
+                    neighbor.box.width,
+                )
+            )
+
+        filtered_neighbor_agents = (
+            np.asarray(filtered_neighbor_agents, dtype=float) if filtered_neighbor_agents else np.empty((0, 8))
         )
-        # 构建 solver 用的 list
-        neighbor_list_for_solver.append({
-            "x": nx, "y": ny, "length": length, "width": width
-        })
 
-    filtered_neighbor_agents = (
-        np.asarray(filtered_neighbor_agents, dtype=float)
-        if filtered_neighbor_agents
-        else np.empty((0, 8))
-    )
-
-    # ================== 碰撞检测 ==================
-    collision_detector = CollisionViolationDetector()
-    original_results = collision_detector.detect(
-        ego_current,
-        ego_future,
-        filtered_neighbor_agents,
-        static_objects,
-    )
-
-    if not original_results:
-        return trajectory
-
-    # ================== 提取碰撞障碍物 & 安全距离 ==================
-    obs_positions = []
-    min_safe_distance = 100.0
-
-    # 1. 首先加入已经发生碰撞的障碍物 (优先级最高)
-    collided_ids = set()
-    for res in original_results:
-        collided_obs = res.get("collided_obs")
-        if not collided_obs: continue
-        
-        # 假设 obs 有唯一 ID，如果没有，可以用坐标 hash
-        # 这里简化处理，直接加进去
-        ox, oy = collided_obs["x"], collided_obs["y"]
-        l, w = collided_obs["length"], collided_obs["width"]
-        
-        obs_positions.append((ox, oy))
-        safe_dist = math.hypot(l, w) / 2.0
-        min_safe_distance = min(min_safe_distance, safe_dist)
-        
-        # 记录一下 ID 或位置防止重复添加 (伪代码逻辑)
-        # collided_ids.add(collided_obs.id)
-
-    # 2. (可选) 加入周围有潜在风险但尚未碰撞的障碍物
-    # 这里是一个简单的距离阈值筛选，避免 iLQR 优化进其他障碍物
-    SEARCH_RADIUS = 30.0 # 米
-    for neighbor in neighbor_list_for_solver:
-        dist = math.hypot(neighbor["x"] - x, neighbor["y"] - y)
-        if dist < SEARCH_RADIUS:
-            # 简单去重逻辑需要根据实际数据结构补充
-            obs_positions.append((neighbor["x"], neighbor["y"]))
-            s_dist = math.hypot(neighbor["length"], neighbor["width"]) / 2.0
-            min_safe_distance = min(min_safe_distance, s_dist)
-
-    # 没有真正的碰撞对象
-    if not obs_positions:
-        return trajectory
-
-    # min_center_dist = _compute_min_center_distance(ego_future[:, :2], obs_positions)
-    # if min_center_dist >= 2:
-    #     # 风险不够大：不干预，避免高精度场景变差
-    #     print("min_center_dist is big")
-    #     return trajectory
-
-    # ================== iLQR 求解 ==================
-    solver_params = ILQRSolverParameters(
-        obstacle_positions=obs_positions,
-        obstacle_safety_distance=min_safe_distance,
-        obstacle_cost_weight=0.5,
-        discretization_time=dt,
-        state_cost_diagonal_entries=[1.0, 1.0, 10.0, 0.0, 0.0],
-        input_cost_diagonal_entries=[1.0, 10.0],
-        state_trust_region_entries=[1.0] * 5,
-        input_trust_region_entries=[1.0] * 2,
-        max_ilqr_iterations=100,
-        convergence_threshold=1e-6,
-        max_solve_time=0.3,
-        max_acceleration=3.0,
-        max_steering_angle=np.pi / 3.0,
-        max_steering_angle_rate=0.5,
-        min_velocity_linearization=0.01,
-    )
-
-    ilqr_solver = ILQRSolver(
-        solver_params=solver_params,
-        warm_start_params=warm_start_params,
-    )
-
-    ilqr_optimizer = ILQROptimizer(
-        n_horizon=len(reference_trajectory),
-        ilqr_solver=ilqr_solver,
-    )
-
-    opt_traj = ilqr_optimizer.optimize_trajectory(
-        initial_state=ego_state,
-        reference_trajectory=reference_trajectory,
-    )
-
-    # ================== 轨迹坐标系转换 ==================
-    opt_abs = np.array([[pt[0], pt[1], pt[2]] for pt in opt_traj], dtype=float)
-
-    ego_rear = ego_state.rear_axle
-    opt_abs = np.vstack(
-        ([ego_rear.x, ego_rear.y, ego_rear.heading], opt_abs)
-    )
-
-    opt_abs_states = [StateSE2.deserialize(p) for p in opt_abs]
-    opt_rel_states = absolute_to_relative_poses(opt_abs_states)
-
-    opt_rel_array = np.array(
-        [[s.x, s.y, s.heading] for s in opt_rel_states], dtype=float
-    )
-
-    states = transform_predictions_to_states(
-        opt_rel_array[1:],
-        history.ego_states,
-        future_horizon,
-        dt,
-    )
-
-    optimized_trajectory = InterpolatedTrajectory(states)
-    
-    # --- 插入可视化代码 ---
-    # 假设你传入了当前的 iteration 编号
-    # visualize_ilqr_comparison(
-    #     ego_state=ego_state, 
-    #     original_traj=trajectory,      # 传入函数最初收到的那个
-    #     optimized_traj=optimized_trajectory, 
-    #     observation=observation,
-    #     iteration=getattr(history, 'iteration', 0) # 尝试获取当前步数
-    # )
-    # ---------------------
-    print("use optimized_trajectory")
-    return optimized_trajectory
-
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-
-def visualize_ilqr_comparison(ego_state, original_traj, optimized_traj, observation, iteration):
-    """
-    可视化 iLQR 优化前后的轨迹对比
-    :param ego_state: 当前自车状态 (EgoState)
-    :param original_traj: 优化前的 InterpolatedTrajectory
-    :param optimized_traj: 优化后的 InterpolatedTrajectory
-    :param observation: 当前环境观察点，用于获取障碍物
-    :param iteration: 当前仿真步数（用于保存图片命名）
-    """
-    # --- 新增检查逻辑 ---
-    def is_traj_valid(trajectory):
-        for state in trajectory.get_sampled_trajectory():
-            if not (np.isfinite(state.center.x) and np.isfinite(state.center.y)):
-                return False
-        return True
-
-    if not is_traj_valid(optimized_traj):
-        print(f"警告: Iteration {iteration} 的优化轨迹包含 NaN 或 Inf，跳过可视化。")
-        return
-    plt.figure(figsize=(12, 12))
-    ax = plt.gca()
-
-    # 1. 提取轨迹点 (x, y)
-    def extract_xy(trajectory):
-        pts = []
-        for state in trajectory.get_sampled_trajectory():
-            pts.append([state.center.x, state.center.y])
-        return np.array(pts)
-
-    orig_pts = extract_xy(original_traj)
-    opt_pts = extract_xy(optimized_traj)
-
-    # 2. 绘制静态障碍物 (如路缘、障碍等)
-    static_objects = observation.tracked_objects.get_static_objects()
-    for obj in static_objects:
-        rect = patches.Rectangle(
-            (obj.center.x - obj.box.length/2, obj.center.y - obj.box.width/2),
-            obj.box.length, obj.box.width,
-            angle=np.degrees(obj.center.heading),
-            linewidth=1, edgecolor='gray', facecolor='lightgray', alpha=0.5
+        collision_detector = CollisionViolationDetector()
+        original_results = collision_detector.detect(
+            ego_current,
+            ego_future,
+            filtered_neighbor_agents,
+            static_objects,
         )
-        ax.add_patch(rect)
+        if not original_results:
+            return trajectory
 
-    # 3. 绘制动态邻车 (Neighbor Agents)
-    agents = observation.tracked_objects.get_agents()
-    for agent in agents:
-        # 绘制邻车矩形框
-        rect = patches.Rectangle(
-            (agent.center.x - agent.box.length/2, agent.center.y - agent.box.width/2),
-            agent.box.length, agent.box.width,
-            angle=np.degrees(agent.center.heading),
-            linewidth=2, edgecolor='orange', facecolor='yellow', alpha=0.6
+        # Build obstacle set from collided obstacles and their short-term linear prediction.
+        obs_positions = []
+        min_safe_distance = 100.0
+        for res in original_results:
+            collided_obs = res.get("collided_obs")
+            if not collided_obs:
+                continue
+
+            ox = float(collided_obs.get("x", 0.0))
+            oy = float(collided_obs.get("y", 0.0))
+            obs_positions.append((ox, oy))
+
+            length = max(0.1, float(collided_obs.get("length", 0.1)))
+            width = max(0.1, float(collided_obs.get("width", 0.1)))
+            safe_dist = math.sqrt(length**2 + width**2) / 2
+            if safe_dist < min_safe_distance:
+                min_safe_distance = safe_dist
+
+        if not obs_positions:
+            return trajectory
+
+        solver_params = ILQRSolverParameters(
+            obstacle_positions=obs_positions,
+            obstacle_safety_distance=min_safe_distance,
+            obstacle_cost_weight=0.1,
+            discretization_time=dt,
+            state_cost_diagonal_entries=[1.0, 1.0, 10.0, 0.2, 0.1],
+            input_cost_diagonal_entries=[1.0, 10.0],
+            state_trust_region_entries=[1.0] * 5,
+            input_trust_region_entries=[1.0] * 2,
+            max_ilqr_iterations=100,
+            convergence_threshold=1e-6,
+            max_solve_time=0.05,
+            max_acceleration=3.0,
+            max_steering_angle=np.pi / 3.0,
+            max_steering_angle_rate=0.5,
+            min_velocity_linearization=0.01,
         )
-        ax.add_patch(rect)
-        # 标注邻车速度（可选）
-        ax.text(agent.center.x, agent.center.y, f"{agent.velocity.magnitude():.1f}m/s", fontsize=8)
 
-    # 4. 绘制轨迹
-    plt.plot(orig_pts[:, 0], orig_pts[:, 1], 'b--', label='Original Trajectory (Planner Output)', alpha=0.7)
-    plt.plot(opt_pts[:, 0], opt_pts[:, 1], 'r-', label='Optimized Trajectory (iLQR)', linewidth=2)
+        ilqr_solver = ILQRSolver(
+            solver_params=solver_params,
+            warm_start_params=warm_start_params,
+        )
+        ilqr_optimizer = ILQROptimizer(
+            n_horizon=len(reference_trajectory),
+            ilqr_solver=ilqr_solver,
+        )
 
-    # 5. 绘制当前自车位置
-    ego_rect = patches.Rectangle(
-        (ego_state.center.x - 4.5/2, ego_state.center.y - 2.0/2), # 假设车长4.5宽2.0
-        4.5, 2.0, angle=np.degrees(ego_state.center.heading),
-        linewidth=2, edgecolor='green', facecolor='none', label='Current Ego'
-    )
-    ax.add_patch(ego_rect)
+        opt_traj = ilqr_optimizer.optimize_trajectory(
+            initial_state=ego_state,
+            reference_trajectory=reference_trajectory,
+        )
+        if opt_traj is None or len(opt_traj) < 2:
+            return trajectory
 
-    # 6. 设置图表样式
-    plt.title(f"Iteration {iteration}: iLQR Optimization Comparison")
-    plt.xlabel("Global X [m]")
-    plt.ylabel("Global Y [m]")
-    plt.legend()
-    plt.axis('equal')
-    plt.grid(True, linestyle=':', alpha=0.6)
+        opt_abs = np.array([[pt[0], pt[1], pt[2]] for pt in opt_traj], dtype=float)
+        ego_rear = ego_state.rear_axle
+        opt_abs = np.vstack(([ego_rear.x, ego_rear.y, ego_rear.heading], opt_abs))
+        opt_abs_states = [StateSE2.deserialize(p) for p in opt_abs]
+        opt_rel_states = absolute_to_relative_poses(opt_abs_states)
+        opt_rel_array = np.array([[s.x, s.y, s.heading] for s in opt_rel_states], dtype=float)[1:]
 
-    # 设置视角锁定在自车周围 (如前后50米)
-    plt.xlim(ego_state.center.x - 40, ego_state.center.x + 40)
-    plt.ylim(ego_state.center.y - 40, ego_state.center.y + 40)
+        target_steps = max(1, int(round(future_horizon / dt)))
+        if opt_rel_array.shape[0] > target_steps:
+            opt_rel_array = opt_rel_array[:target_steps]
+        elif opt_rel_array.shape[0] < target_steps:
+            pad = np.repeat(opt_rel_array[-1][None, :], target_steps - opt_rel_array.shape[0], axis=0)
+            opt_rel_array = np.vstack([opt_rel_array, pad])
 
-    # 保存图片
-    plt.savefig(f"ilqr_debug_{iteration}.png")
-    # plt.show()
-    plt.close()
+        states = transform_predictions_to_states(
+            opt_rel_array,
+            history.ego_states,
+            future_horizon,
+            dt,
+        )
+        optimized_trajectory = InterpolatedTrajectory(states)
+
+        return optimized_trajectory
+    except Exception as e:
+        logging.warning(f"iLQR replan failed, fallback to original trajectory: {e}")
+        return trajectory

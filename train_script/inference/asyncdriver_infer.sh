@@ -2,7 +2,7 @@ CUDA_VISIBLE_DEVICES=$1 python train_script/inference/simulator_qwen4drive.py \
 --planner qwen/output/emodriver2/checkpoint-16875 \
 --base_model qwen/qwen/Qwen3-8B \
 --planner_type qwen4drive_lora_ins_wo_stop \
---save_dir asyncdriver_self \
+--save_dir emodirver \
 --ins_wo_stop \
 --short_ins 30 \
 --lora_r 8 \

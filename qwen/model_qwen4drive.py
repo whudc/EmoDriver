@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_FOR_DOC = "Qwen3Config"
 
+
+
 @dataclass
 class BaseModelOutputWithPastDrive(ModelOutput):
     last_hidden_state: torch.FloatTensor = None
@@ -75,6 +77,86 @@ class CausalLMOutputWithPastWithModel(CausalLMOutputWithPast):
     predictions: Optional[Tuple[torch.FloatTensor]] = None
     plan: Optional[Tuple[torch.FloatTensor]] = None
     llm_plan: Optional[Tuple[torch.FloatTensor]] = None
+
+
+class EmotionInjection(nn.Module):
+    def __init__(
+            self,
+            hidden_size: int,
+            feature_size: int,
+            pad_dim: int = 3,
+            dropout: float = 0.1,
+            max_scale: float = 0.3,   # 限制最大注入幅度
+        ):
+        super().__init__()
+
+        self.max_scale = max_scale
+
+        self.pad_norm = nn.LayerNorm(pad_dim)
+        self.pad_dropout = nn.Dropout(dropout)
+
+        # 只学习 delta，而不是直接改原特征
+        self.hidden_delta = nn.Linear(pad_dim, hidden_size)
+        self.feature_delta = nn.Linear(pad_dim, feature_size)
+
+        self.gate = nn.Sequential(
+            nn.Linear(pad_dim, 1),
+            nn.Sigmoid(),
+        )
+
+        self.reset_parameters_identity()
+
+    def reset_parameters_identity(self):
+        # 初始几乎不影响主干网络
+        nn.init.zeros_(self.hidden_delta.weight)
+        nn.init.zeros_(self.hidden_delta.bias)
+
+        nn.init.zeros_(self.feature_delta.weight)
+        nn.init.zeros_(self.feature_delta.bias)
+
+        nn.init.zeros_(self.gate[0].weight)
+        nn.init.constant_(self.gate[0].bias, -3.0)  # 初始 gate ≈ 0.05
+
+    def forward(
+        self,
+        hidden_state: torch.FloatTensor,
+        llm_feature: torch.FloatTensor,
+        pad_state: torch.FloatTensor,
+        injection_scale: float = 1.0,
+    ):
+        """
+        hidden_state: (B, H)
+        llm_feature:  (B, F)
+        pad_state:    (B, pad_dim)
+        """
+
+        # === 1. 归一化 emotion 向量 ===
+        pad_state = self.pad_norm(pad_state)
+        pad_state = self.pad_dropout(pad_state)
+
+        # === 2. gate 控制 ===
+        gate = self.gate(pad_state)  # (B,1)
+        gate = gate * injection_scale
+
+        # 限制最大注入幅度（非常重要）
+        gate = torch.clamp(gate, 0.0, self.max_scale)
+
+        # === 3. 计算 delta ===
+        hidden_delta = torch.tanh(self.hidden_delta(pad_state))
+        feature_delta = torch.tanh(self.feature_delta(pad_state))
+
+        # === 4. Residual 注入（安全版本）===
+        hidden_state = hidden_state + gate * hidden_delta
+        llm_feature = llm_feature + gate * feature_delta
+
+        # === 5. 防止 FP16 爆数值 ===
+        hidden_state = torch.clamp(hidden_state, -50.0, 50.0)
+        llm_feature = torch.clamp(llm_feature, -50.0, 50.0)
+
+        return hidden_state, llm_feature, pad_state
+
+
+
 
 class Qwen3PreTrainedModel(PreTrainedModel):
     config_class = Qwen3Config
@@ -286,7 +368,8 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
                              'acc_classification',
                              'lane_change',
                              'traffic_light',
-                             'feature_adapter']
+                             'feature_adapter',
+                             'emotion_injector']
 
     _keep_small_lr_modules = [
             'gameformer',
@@ -300,7 +383,10 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         self.vocab_size = config.vocab_size
         self.feature_len = config.feature_len
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        
+
+        self.use_emotion_injection = bool(getattr(config, "use_emotion_injection", True))
+        self.emotion_injection_scale = float(getattr(config, "emotion_injection_scale", 1.0))
+
         # Add Map adapter layers
         self.map_insize = config.map_insize
         self.map_adapter = nn.Linear(self.map_insize, config.hidden_size, bias=False)
@@ -347,7 +433,14 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
             self.gameformer =  LLMEnhancedGameFormer(encoder_layers=3, decoder_levels=2, modalities=6, neighbors=10)
         self.map_encoder = GameformerEncoder(layers=3)
         self.feature_adapter = nn.Linear(self.model.config.hidden_size, 256)
-            
+
+        self.emotion_injector = EmotionInjection(
+            hidden_size=self.model.config.hidden_size,
+            feature_size=256,
+            pad_dim=3,
+            dropout=0.1,
+        )
+
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
         self.post_init()
@@ -479,6 +572,7 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        pad_state: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPastWithModel]:
         if not inference:
             ego_future_gt = ego_future
@@ -540,7 +634,16 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
         else:
             hidden_states = hidden_states[:, -1, :]
             predicted_feature = self.feature_adapter(hidden_states)
-            
+
+        pad_pred = pad_state.to(hidden_states.device, dtype=hidden_states.dtype)
+        if self.use_emotion_injection:
+            hidden_states, predicted_feature, pad_pred = self.emotion_injector(
+                hidden_state=hidden_states,
+                llm_feature=predicted_feature,
+                pad_state=pad_pred,
+                injection_scale=self.emotion_injection_scale,
+            )
+
         # loss for llm hidden feature
         predicted_waypoints = self.waypoints_predictor(hidden_states)
         predicted_waypoints = predicted_waypoints.reshape(predicted_waypoints.shape[0], self.feature_len, 2)
@@ -728,9 +831,6 @@ class Qwen3ForCausalLM(GenerationMixin, Qwen3PreTrainedModel):
                 param.data.copy_(loaded_weight[name])
                 logger.info(f"Load embed_tokens weight {name} from {model_id}")
             
-
-                
-
     def prepare_inputs_for_generation(
         self, input_ids, map_feats, map_masks, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ):
@@ -829,6 +929,7 @@ class ModelWithLoRA(PeftModelForCausalLM):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        pad_state: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPastWithModel]:
 
@@ -840,6 +941,7 @@ class ModelWithLoRA(PeftModelForCausalLM):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            pad_state=pad_state,
             **kwargs,
         )
         return outputs

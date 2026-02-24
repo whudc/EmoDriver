@@ -70,7 +70,8 @@ def parse_args():
     parser.add_argument('--base_model', type=str, default=None, help='Path to base Qwen model')
     parser.add_argument('--simulation_root_path', type=str, default=None,
                        help='Root path for simulation results')
-
+    parser.add_argument('--enable_ilqr', type=int, default=1, choices=[0, 1],
+                       help='Enable iLQR optimization: 1=on, 0=off')
     return parser.parse_args()
 
 
@@ -127,6 +128,7 @@ if __name__ == '__main__':
         f'planner.{PLANNER}.enable_pdm_scorer_in_multirefpath={args.refine}',  # Remove + (exists in yaml)
         f'planner.{PLANNER}.lora_r={args.lora_r}',  # Remove + (exists in yaml)
         f'planner.{PLANNER}.short_ins={args.short_ins}',  # Remove + (exists in yaml)
+        f'planner.{PLANNER}.enable_ilqr={bool(args.enable_ilqr)}',
         f'scenario_filter.num_scenarios_per_type=20',
         "hydra.searchpath=[pkg://nuplan.planning.script.config.common, pkg://nuplan.planning.script.experiments]",
     ]

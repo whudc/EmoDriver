@@ -1,10 +1,12 @@
 """Asynchronous Qwen4DrivePlanner - LLM runs in separate process"""
 import logging
 import time
+import os
 from typing import Dict, List
 import numpy as np
 import torch
 import math
+import matplotlib.pyplot as plt
 
 from shapely import Point
 
@@ -19,7 +21,6 @@ from gameformer.state_lattice_planner import LatticePlanner
 
 from qwen.planner.async_llm_manager import AsyncLLMManager
 from qwen.planner.qwen4drive_planner import ilqr_replan_if_collision
-
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.actor_state.state_representation import StateSE2
 from nuplan.common.maps.abstract_map import AbstractMap
@@ -58,6 +59,7 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
                  scenario: AbstractScenario,
                  sub_planner: AbstractPlanner = None,
                  enable_pdm_scorer_in_multirefpath=False,
+                 enable_ilqr=True,
                  disable_refpath=False,
                  ins_mode=None,
                  llm_plan=False,
@@ -68,6 +70,8 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
                  near_multiple_vehicles=False,
                  short_ins=-1,
                  llm_inf_step=1,
+                 use_emotion_injection=True,
+                 emotion_injection_scale=1.0,
                  model_cfg=None,
                  model_urban: TorchModuleWrapper = None,
                  async_mode=True,
@@ -87,7 +91,7 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
         self.model_name_or_path = model_name_or_path
         self.near_multiple_vehicles = near_multiple_vehicles
         self.short_ins = short_ins
-
+        self.enable_ilqr = enable_ilqr
         logging.error(f'Ins mode: {ins_mode}')
         if ins_mode in ['gt', 'plain_ref']:
             ins_mode = None
@@ -97,6 +101,8 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
         model_cfg['lora_r'] = lora_r
         model_cfg['finetune_model_path'] = finetune_model_path
         model_cfg['llm_inf_step'] = llm_inf_step
+        model_cfg['use_emotion_injection'] = use_emotion_injection
+        model_cfg['emotion_injection_scale'] = emotion_injection_scale
         model_cfg['near_multiple_vehicles'] = near_multiple_vehicles
         model_cfg['model_name_or_path'] = model_name_or_path
         self._model_cfg = model_cfg
@@ -111,6 +117,9 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
         self.llm_wait_times = []
         self.gameformer_times = []
         self.total_iterations = 0
+        self.enable_debug_viz = bool(model_cfg.get('enable_debug_viz', True))
+        self.debug_viz_interval = int(model_cfg.get('debug_viz_interval', 1))
+        self.debug_viz_dir = model_cfg.get('debug_viz_dir', 'planner_viz')
 
         if enable_pdm_scorer_in_multirefpath:
             logging.info('PDM scorer enabled in multi-refpath mode')
@@ -222,16 +231,16 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
                 plan = torch.from_numpy(output_data['plan']).to(self.gameformer_device) \
                     if output_data['plan'] is not None else None
 
-            if self.total_iterations % 10 == 0:
-                logging.info(f"[Async] LLM iter {output_data.get('iteration', -1)}, "
-                           f"LLM time: {output_data.get('inference_time', 0):.3f}s, wait: {wait_time:.4f}s")
+            # if self.total_iterations % 10 == 0:
+            #     logging.info(f"[Async] LLM iter {output_data.get('iteration', -1)}, "
+            #                f"LLM time: {output_data.get('inference_time', 0):.3f}s, wait: {wait_time:.4f}s")
 
         else:
             start_time = time.perf_counter()
             output = self._model.inference(features, ref_path, cur_iter)
             predictions = output.predictions
             plan = output.llm_plan if self.llm_plan else output.plan
-            logging.info(f"[Sync] LLM time: {time.perf_counter() - start_time:.3f}s")
+            # logging.info(f"[Sync] LLM time: {time.perf_counter() - start_time:.3f}s")
 
         # Extract level-k predictions
         if predictions is not None:
@@ -305,6 +314,102 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
 
         return ans
 
+    @staticmethod
+    def _to_global_xy(relative_xy: np.ndarray, ego_state: EgoState) -> np.ndarray:
+        if relative_xy is None:
+            return None
+        arr = np.asarray(relative_xy, dtype=float)
+        if arr.size == 0:
+            return None
+        if arr.ndim == 1:
+            arr = arr[None, :]
+        if arr.shape[-1] < 2:
+            return None
+
+        dx = arr[:, 0]
+        dy = arr[:, 1]
+        ego_x = ego_state.rear_axle.x
+        ego_y = ego_state.rear_axle.y
+        ego_h = ego_state.rear_axle.heading
+
+        cos_h = np.cos(ego_h)
+        sin_h = np.sin(ego_h)
+        x = ego_x + cos_h * dx - sin_h * dy
+        y = ego_y + sin_h * dx + cos_h * dy
+        return np.column_stack([x, y])
+
+    @staticmethod
+    def _trajectory_to_xy(trajectory: InterpolatedTrajectory) -> np.ndarray:
+        if trajectory is None:
+            return None
+        pts = []
+        for state in trajectory.get_sampled_trajectory():
+            pts.append([state.center.x, state.center.y])
+        if len(pts) == 0:
+            return None
+        return np.asarray(pts, dtype=float)
+
+    def _visualize_planner_outputs(
+        self,
+        ego_state: EgoState,
+        iteration: int,
+        gt_rel: np.ndarray = None,
+        llm_plan_rel: np.ndarray = None,
+        gameformer_rel: np.ndarray = None,
+        ref_path_rel: np.ndarray = None,
+        pred_trajectory: InterpolatedTrajectory = None,
+    ) -> None:
+        if not self.enable_debug_viz:
+            return
+        if self.debug_viz_interval <= 0:
+            return
+        if iteration % self.debug_viz_interval != 0:
+            return
+
+        os.makedirs(self.debug_viz_dir, exist_ok=True)
+
+        gt_xy = self._to_global_xy(gt_rel[:, :2], ego_state) if gt_rel is not None else None
+        llm_xy = self._to_global_xy(llm_plan_rel[:, :2], ego_state) if llm_plan_rel is not None else None
+        gf_xy = self._to_global_xy(gameformer_rel[:, :2], ego_state) if gameformer_rel is not None else None
+        ref_xy = self._to_global_xy(ref_path_rel[:, :2], ego_state) if ref_path_rel is not None else None
+        pred_xy = self._trajectory_to_xy(pred_trajectory)
+
+        fig, ax = plt.subplots(figsize=(10, 10))
+
+        if gt_xy is not None:
+            ax.plot(gt_xy[:, 0], gt_xy[:, 1], color='black', linewidth=2.0, linestyle='--', label='GT trajectory')
+        if llm_xy is not None:
+            ax.plot(llm_xy[:, 0], llm_xy[:, 1], color='royalblue', linewidth=2.0, label='LLM plan')
+        if gf_xy is not None:
+            ax.plot(gf_xy[:, 0], gf_xy[:, 1], color='crimson', linewidth=2.0, label='GameFormer output')
+        if ref_xy is not None:
+            ax.plot(ref_xy[:, 0], ref_xy[:, 1], color='darkgreen', linewidth=2.0, linestyle=':', label='Ref path')
+        if pred_xy is not None:
+            ax.plot(pred_xy[:, 0], pred_xy[:, 1], color='orange', linewidth=2.5, label='Prediction')
+
+        ax.scatter(
+            [ego_state.center.x],
+            [ego_state.center.y],
+            s=40,
+            color='purple',
+            label='Ego current',
+            zorder=5
+        )
+
+        ax.set_title(f'Planner Visualization - Iter {iteration}')
+        ax.set_xlabel('Global X [m]')
+        ax.set_ylabel('Global Y [m]')
+        ax.set_aspect('equal', adjustable='box')
+        ax.grid(True, linestyle='--', alpha=0.4)
+        ax.legend()
+        ax.set_xlim(ego_state.center.x - 40, ego_state.center.x + 40)
+        ax.set_ylim(ego_state.center.y - 40, ego_state.center.y + 40)
+
+        save_path = os.path.join(self.debug_viz_dir, f'planner_viz_{iteration:05d}.png')
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.close(fig)
+
     def _plan(self, ego_state, history, traffic_light_data, observation, cur_iter):
         start_time = time.perf_counter()
 
@@ -339,18 +444,24 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
         # Get LLM prediction (async or sync)
         plan, predictions, pred_scores, ego_state_transformed, neighbors_state_transformed = \
             self._get_prediction(features, ins_path, cur_iter)
+        llm_plan_rel = plan[0].detach().cpu().numpy() if plan is not None else None
 
         if self.disable_refpath:
+            print('ref path is disabled !!!!!!!!!!!!')
             ref_path = None
 
         # GameFormer trajectory planning
         gameformer_start = time.perf_counter()
+        gameformer_plan_rel = None
+        selected_ref_path = None
         with torch.no_grad():
             if self.enable_pdm_scorer_in_multirefpath:
                 # Multi-path: score each path with PDM
                 max_score = -1
                 max_traj = None
                 corr_cost = -1
+                best_plan_r = None
+                best_ref_path = None
                 for ref_path, cost in ref_path_set:
                     plan_r = self._trajectory_planner.plan(ego_state, ego_state_transformed, neighbors_state_transformed,
                                                           predictions, plan, pred_scores, ref_path, observation)
@@ -362,24 +473,47 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
                         max_score = curr_score
                         max_traj = trajectory
                         corr_cost = cost
+                        best_plan_r = plan_r
+                        best_ref_path = ref_path
 
                 if max_traj is None:
                     plan = self._trajectory_planner.plan(ego_state, ego_state_transformed, neighbors_state_transformed,
                                                         predictions, plan, pred_scores, None, observation)
                     states = transform_predictions_to_states(plan, history.ego_states, self._future_horizon, 0.1)
                     trajectory = InterpolatedTrajectory(states)
+                    gameformer_plan_rel = plan
+                    selected_ref_path = None
                 else:
-                    logging.info(f"Iter {self.iteration}: Max score={max_score:.3f}, cost={corr_cost:.3f}")
+                    # logging.info(f"Iter {self.iteration}: Max score={max_score:.3f}, cost={corr_cost:.3f}")
                     trajectory = max_traj
+                    gameformer_plan_rel = best_plan_r
+                    selected_ref_path = best_ref_path
             else:
                 # Single path
                 plan = self._trajectory_planner.plan(ego_state, ego_state_transformed, neighbors_state_transformed,
                                                     predictions, plan, pred_scores, ref_path, observation)
                 states = transform_predictions_to_states(plan, history.ego_states, self._future_horizon, 0.1)
                 trajectory = InterpolatedTrajectory(states)
+                gameformer_plan_rel = plan
+                selected_ref_path = ref_path
 
         gameformer_time = time.perf_counter() - gameformer_start
         self.gameformer_times.append(gameformer_time)
+
+        iter_index = cur_iter.index if hasattr(cur_iter, 'index') else int(cur_iter)
+        gt_traj_rel = self.get_ego_agent_future(ego_state)
+        # try:
+        #     self._visualize_planner_outputs(
+        #         ego_state=ego_state,
+        #         iteration=iter_index,
+        #         gt_rel=gt_traj_rel,
+        #         llm_plan_rel=llm_plan_rel,
+        #         gameformer_rel=gameformer_plan_rel,
+        #         ref_path_rel=selected_ref_path,
+        #         pred_trajectory=trajectory,
+        #     )
+        # except Exception as e:
+        #     logging.warning(f"Visualization failed at iteration {iter_index}: {e}")
 
         return trajectory
 
@@ -424,27 +558,18 @@ class AsyncQwen4DrivePlanner(BaseGFPlanner):
 
         # Main planning
         trajectory = self._plan(ego_state, history, traffic_light_data, observation, current_input.iteration)
-        # trajectory = ilqr_replan_if_collision(
-        #     ego_state=ego_state,
-        #     trajectory=trajectory,
-        #     observation=observation,
-        #     history=history,
-        #     future_horizon=self._future_horizon,
-        #     dt=0.1,
-        # )
+
         total_time = time.time() - s
         self._compute_trajectory_runtimes.append(total_time)
-
-        # Log stats every 50 iterations
-        if iteration % 50 == 0 and iteration > 0:
-            avg_llm_wait = np.mean(self.llm_wait_times[-50:]) if self.llm_wait_times else 0
-            avg_gameformer = np.mean(self.gameformer_times[-50:]) if self.gameformer_times else 0
-            logging.info(
-                f"[Stats] Iter {iteration}: Total={total_time:.3f}s, "
-                f"Avg LLM wait={avg_llm_wait:.4f}s, Avg GameFormer={avg_gameformer:.3f}s"
+        if self.enable_ilqr:
+            trajectory = ilqr_replan_if_collision(
+                ego_state=ego_state,
+                trajectory=trajectory,
+                observation=observation,
+                history=history,
+                future_horizon=self._future_horizon,
+                dt=0.1,
             )
-
-        logging.error(f'Iteration {iteration}: {total_time:.3f}s')
 
         return trajectory
 

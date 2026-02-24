@@ -1,23 +1,24 @@
 root_dir=./qwen
-task_name=drive_qa_pad
-MASTER_PORT=29501
+task_name=mix_driveqa_decision_pad
+MASTER_PORT=29542
 
-deepspeed --include=localhost:$1 --master_port $MASTER_PORT qwen/sft_qwen_trainer.py \
+deepspeed --include=localhost:$1 --master_port $MASTER_PORT  qwen/sft_qwen_trainer.py \
 --model_name_or_path qwen/qwen/Qwen3-8B \
---train_files pad_planning_qa_train.json \
---validation_files pad_planning_qa_val.json \
---per_device_train_batch_size 4 \
+--train_files pad_planning_mix_train_5000.json \
+--validation_files pad_planning_mix_val_1000.json \
+--ckpt_path qwen/output/drive_qa_pad/ \
+--per_device_train_batch_size 2 \
 --per_device_eval_batch_size 1 \
 --do_train \
 --do_eval \
 --use_fast_tokenizer False \
 --output_dir ${root_dir}/output/${task_name} \
 --eval_strategy steps \
---learning_rate 5e-4 \
+--learning_rate 5e-5 \
 --gradient_accumulation_steps 10 \
 --freeze_map_adapter True \
 --num_train_epochs 1 \
---warmup_steps 25 \
+--warmup_steps 10 \
 --load_in_bits 4 \
 --lora_r 8 \
 --lora_alpha 32 \
@@ -28,8 +29,8 @@ deepspeed --include=localhost:$1 --master_port $MASTER_PORT qwen/sft_qwen_traine
 --save_strategy steps \
 --preprocessing_num_workers 10 \
 --save_total_limit 1 \
---save_steps 1000 \
---eval_steps 1000 \
+--save_steps 10000 \
+--eval_steps 10000 \
 --seed 7 \
 --disable_tqdm False \
 --ddp_find_unused_parameters False \
@@ -42,6 +43,5 @@ deepspeed --include=localhost:$1 --master_port $MASTER_PORT qwen/sft_qwen_traine
 --bf16 \
 --bf16_full_eval \
 --ddp_timeout 18000000 \
---add_special_tokens "<map>,</map>"
-# --resume_from_checkpoint ${root_dir}/checkpoint-20400 \
-# --layers_to_transform 39 \
+--add_special_tokens "<map>,</map>" \
+# --gradient_checkpointing 
